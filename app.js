@@ -93,6 +93,8 @@
     // stays sharp. Grid view: a screen-space overlay dolly (unchanged).
     let focusActive = false, focusReturning = false, focusTile = null, focusAmt = 0;
     let focusMode = 'canvas';
+    let flight = false;            // canvas focus: suspend wrapping so the camera
+                                   // can fly straight at the work without it jumping
     const fstart = { sx: 0, sy: 0, scale: 1, restH: 1 };
     const camTarget = { x: 0, y: 0, z: 0 };
     const preCam = { x: 0, y: 0, z: 0 };
@@ -194,7 +196,7 @@
           el, img, work, idx, label: label.querySelector('[data-sub]'),
           wx: rand() * period, wy: rand() * period, wz: rand() * PZ,
           size: SIZE_MIN + rand() * SIZE_SPAN,
-          op: 0, gx: 0, gy: 0, lpx: 0, lpy: 0, ls: 0,
+          op: 0, gx: 0, gy: 0, lpx: 0, lpy: 0, ls: 0, fx: 0, fy: 0, fz: 0,
           lastOp: -1, lastZ: 0, lastPE: '', loaded: false
         };
         // NB: clicks are handled in onUp (pointer capture swallows the
@@ -239,15 +241,23 @@
       fstart.scale = fstart.restH > 0 ? (BASE * t.ls) / fstart.restH : 0.2;
 
       if (focusMode === 'canvas') {
-        // Dolly the camera forward (z only) for the fly-through. We deliberately
-        // do NOT pan x/y to centre — that would make the toroidally-wrapped
-        // field jump (flicker). The overlay does the centring instead.
+        // Freeze each tile's *unwrapped* world position (its currently-visible
+        // copy) so the camera can fly anywhere without the toroidal tiling
+        // jumping. Projection is identical at this instant, then continuous.
+        for (let k = 0; k < tiles.length; k++) {
+          const tk = tiles[k];
+          tk.fx = cam.x + (wrap(tk.wx - cam.x + period / 2, period) - period / 2);
+          tk.fy = cam.y + (wrap(tk.wy - cam.y + period / 2, period) - period / 2);
+          tk.fz = cam.z - (wrap((cam.z - tk.wz) + 40, PZ) - 40);
+        }
+        flight = true;
         preCam.x = cam.x; preCam.y = cam.y; preCam.z = cam.z;
-        camTarget.x = cam.x;
-        camTarget.y = cam.y;
-        const depthNow = wrap((cam.z - t.wz) + 40, PZ) - 40;
+        // Fly straight at the work: centre it (cam.xy → its xy) and dolly until
+        // it fills the frame (depth → depthFit).
         const depthFit = (t.size * focal) / fstart.restH;
-        camTarget.z = cam.z + (depthFit - depthNow);   // fly toward the work
+        camTarget.x = t.fx;
+        camTarget.y = t.fy;
+        camTarget.z = t.fz + depthFit;
       }
 
       els.focusImg.src = t.work.imgHi || t.work.img;     // pre-loaded → crisp
@@ -303,14 +313,16 @@
         cam.z += (tgt.z - cam.z) * 0.08;
         if (focusReturning &&
             Math.abs(cam.x - tgt.x) + Math.abs(cam.y - tgt.y) + Math.abs(cam.z - tgt.z) < 0.5) {
-          focusActive = false; focusReturning = false; focusTile = null;
+          focusActive = false; focusReturning = false; focusTile = null; flight = false;
         }
       } else {
         if (focusReturning && focusAmt < 0.01) { focusActive = false; focusReturning = false; focusTile = null; }
         if (!focusActive && focusAmt < 0.002 && morph < 0.002) simCamera();
       }
 
-      const overlayOp = focusAmt;   // crossfade the crisp overlay in as we dolly
+      // overlay crossfade: canvas ramps in fast then tracks the centring tile,
+      // grid follows the dolly directly.
+      const overlayOp = focusMode === 'canvas' ? Math.min(1, focusAmt * 4) : focusAmt;
 
       gridScrollY += (gridScrollTarget - gridScrollY) * 0.16;
 
@@ -322,9 +334,18 @@
         t.gy += (g.y - t.gy) * 0.2;
         const gScale = 0.8 * Math.min(cell / BASE, cell / (BASE * t.work.aspect));  // 20% smaller in grid
 
-        const relX = wrap(t.wx - cam.x + period / 2, period) - period / 2;
-        const relY = wrap(t.wy - cam.y + period / 2, period) - period / 2;
-        const depth = wrap((cam.z - t.wz) + 40, PZ) - 40;     // [-40, 320]
+        // During a canvas flight, wrapping is suspended: tiles use their frozen
+        // unwrapped positions so the camera can fly straight at the work.
+        let relX, relY, depth;
+        if (flight) {
+          relX = t.fx - cam.x;
+          relY = t.fy - cam.y;
+          depth = cam.z - t.fz;
+        } else {
+          relX = wrap(t.wx - cam.x + period / 2, period) - period / 2;
+          relY = wrap(t.wy - cam.y + period / 2, period) - period / 2;
+          depth = wrap((cam.z - t.wz) + 40, PZ) - 40;     // [-40, 320]
+        }
         const dd = Math.max(depth, 4);
         const pScale = focal / dd;
         const csx = cx + relX * pScale;
@@ -345,8 +366,12 @@
         // remember the on-screen rect so the overlay can track / dolly from here
         t.lpx = px; t.lpy = py; t.ls = s;
 
-        // focus: the whole field (including the clicked tile) fades behind the overlay
-        if (focusAmt > 0.001) op *= (1 - focusAmt);
+        // focus: field flies past + fades; the clicked tile gives way to the
+        // crisp overlay that tracks it
+        if (focusAmt > 0.001) {
+          if (t === focusTile) op *= (1 - overlayOp);
+          else op *= (1 - focusAmt);
+        }
 
         t.el.style.transform =
           `translate(${px.toFixed(1)}px, ${py.toFixed(1)}px) translate(-50%, -50%) scale(${s.toFixed(4)})`;
@@ -363,15 +388,21 @@
         if (pe !== t.lastPE) { t.el.style.pointerEvents = pe; t.lastPE = pe; }
       }
 
-      // Crisp full-size overlay: a smooth snapshot dolly from the clicked tile's
-      // rect to the centred full-screen fit. Independent of the camera, so it
-      // always ends perfectly centred (no clipping) and only ever downscales
-      // (scale ≤ 1 ⇒ sharp).
-      if (focusAmt > 0.0005) {
-        const fa = easeInOut(focusAmt);
-        const tx = (fstart.sx - cx) * (1 - fa);
-        const ty = (fstart.sy - cy) * (1 - fa);
-        const sc = 1 - (1 - fa) * (1 - fstart.scale);
+      // Crisp full-size overlay. Canvas: track the focused tile as the camera
+      // flies it to centre + full screen (scale ≤ 1 ⇒ only downscaled ⇒ sharp).
+      // Grid: a snapshot dolly from the tile's rect to the centred fit.
+      if (focusAmt > 0.0005 && focusTile) {
+        let tx, ty, sc;
+        if (focusMode === 'canvas') {
+          sc = Math.min(1, (BASE * focusTile.ls) / fstart.restH);
+          tx = focusTile.lpx - cx;
+          ty = focusTile.lpy - cy;
+        } else {
+          const fa = easeInOut(focusAmt);
+          tx = (fstart.sx - cx) * (1 - fa);
+          ty = (fstart.sy - cy) * (1 - fa);
+          sc = 1 - (1 - fa) * (1 - fstart.scale);
+        }
         els.focusImg.style.transform = `translate(${tx.toFixed(1)}px, ${ty.toFixed(1)}px) scale(${sc.toFixed(4)})`;
         els.focusview.style.opacity = overlayOp;
       } else if (els.focusview.style.opacity !== '0') {
