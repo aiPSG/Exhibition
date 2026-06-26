@@ -88,10 +88,14 @@
     // view morph: 0 = canvas, 1 = grid
     let morph = 0, morphTarget = 0;
 
-    // focus: a crisp full-size <img> overlay dollies in from the clicked
-    // tile's screen rect; the field fades out behind it.
-    let focusActive = false, focusTile = null, focusAmt = 0;
-    const fstart = { sx: 0, sy: 0, scale: 1 };   // overlay start transform
+    // focus. Canvas view: a real camera dolly (centre + fly toward the work)
+    // with a crisp full-size <img> overlay tracking the focused tile so it
+    // stays sharp. Grid view: a screen-space overlay dolly (unchanged).
+    let focusActive = false, focusReturning = false, focusTile = null, focusAmt = 0;
+    let focusMode = 'canvas';
+    const fstart = { sx: 0, sy: 0, scale: 1, restH: 1 };
+    const camTarget = { x: 0, y: 0, z: 0 };
+    const preCam = { x: 0, y: 0, z: 0 };
 
     // grid layout
     let cols = 4, cell = 200, stride = 222, gridLeft = 0, gridTop = 96;
@@ -221,19 +225,30 @@
       };
     }
 
-    /* ---- focus (screen-space dolly to full screen) --------------------- */
+    /* ---- focus --------------------------------------------------------- */
     function focusOn(t) {
       if (focusActive) return;
-      focusActive = true; focusTile = t;
+      focusActive = true; focusReturning = false; focusTile = t;
+      focusMode = morphTarget === 1 ? 'grid' : 'canvas';
       vel.x = vel.y = vel.z = tvel.x = tvel.y = tvel.z = scrollAccum = 0;
 
-      // Snapshot the tile's on-screen rect so the crisp overlay can dolly in
-      // from exactly there. The overlay rests at a 90% contain fit.
       const vw = 2 * cx, vh = 2 * cy;
-      const restH = Math.min(0.9 * vh, (0.9 * vw) / t.work.aspect);
-      const tileH = BASE * t.ls;
+      fstart.restH = Math.min(0.9 * vh, (0.9 * vw) / t.work.aspect);   // full-screen fit
+      // grid: overlay dolls from the tile's current rect to the fit
       fstart.sx = t.lpx; fstart.sy = t.lpy;
-      fstart.scale = restH > 0 ? tileH / restH : 0.2;
+      fstart.scale = fstart.restH > 0 ? (BASE * t.ls) / fstart.restH : 0.2;
+
+      if (focusMode === 'canvas') {
+        // real camera move: centre on the work, then dolly until it fills the fit
+        preCam.x = cam.x; preCam.y = cam.y; preCam.z = cam.z;
+        const relX = wrap(t.wx - cam.x + period / 2, period) - period / 2;
+        const relY = wrap(t.wy - cam.y + period / 2, period) - period / 2;
+        camTarget.x = cam.x + relX;
+        camTarget.y = cam.y + relY;
+        const depthNow = wrap((cam.z - t.wz) + 40, PZ) - 40;
+        const depthFit = (t.size * focal) / fstart.restH;   // projects to restH tall
+        camTarget.z = cam.z + (depthFit - depthNow);
+      }
 
       els.focusImg.src = t.work.imgHi || t.work.img;     // pre-loaded → crisp
       els.focusImg.alt = t.work.title;
@@ -246,8 +261,8 @@
       els.focusbar.classList.add('is-on');
     }
     function exitFocus() {
-      if (!focusActive) return;
-      focusActive = false;
+      if (!focusActive || focusReturning) return;
+      focusReturning = true;                 // canvas: fly camera back; grid: fade out
       els.body.classList.remove('mode-focus');
       els.focusbar.classList.remove('is-on');
     }
@@ -274,26 +289,30 @@
       }
       const m = easeInOut(morph);
 
-      // focus dolly amount (0..1). The camera is frozen while focusing so the
-      // work returns to exactly where it left when you exit.
-      const focusGoal = focusActive ? 1 : 0;
+      // focus progress 0..1
+      const focusGoal = (focusActive && !focusReturning) ? 1 : 0;
       focusAmt += (focusGoal - focusAmt) * 0.09;
       if (Math.abs(focusGoal - focusAmt) < 0.001) focusAmt = focusGoal;
-      if (focusAmt === 0) focusTile = null;
 
-      // dolly the crisp overlay between the tile's rect and the full-screen fit
-      if (focusAmt > 0.0005) {
-        const fa = focusAmt;
-        const tx = (fstart.sx - cx) * (1 - fa);
-        const ty = (fstart.sy - cy) * (1 - fa);
-        const sc = 1 - (1 - fa) * (1 - fstart.scale);
-        els.focusImg.style.transform = `translate(${tx.toFixed(1)}px, ${ty.toFixed(1)}px) scale(${sc.toFixed(4)})`;
-        els.focusview.style.opacity = Math.min(1, fa * 1.2);
-      } else if (els.focusview.style.opacity !== '0') {
-        els.focusview.style.opacity = '0';
+      // camera: in canvas focus the camera actually flies to (or back from)
+      // the work; otherwise it runs the normal momentum simulation.
+      if (focusMode === 'canvas' && (focusActive || focusReturning)) {
+        const tgt = focusReturning ? preCam : camTarget;
+        cam.x += (tgt.x - cam.x) * 0.08;
+        cam.y += (tgt.y - cam.y) * 0.08;
+        cam.z += (tgt.z - cam.z) * 0.08;
+        if (focusReturning &&
+            Math.abs(cam.x - tgt.x) + Math.abs(cam.y - tgt.y) + Math.abs(cam.z - tgt.z) < 0.5) {
+          focusActive = false; focusReturning = false; focusTile = null;
+        }
+      } else {
+        if (focusReturning && focusAmt < 0.01) { focusActive = false; focusReturning = false; focusTile = null; }
+        if (!focusActive && focusAmt < 0.002 && morph < 0.002) simCamera();
       }
 
-      if (!focusActive && focusAmt < 0.002 && morph < 0.002) simCamera();
+      // overlay fade: canvas ramps in fast (then just tracks the tile), grid
+      // follows the dolly progress directly.
+      const overlayOp = focusMode === 'canvas' ? Math.min(1, focusAmt * 4) : focusAmt;
 
       gridScrollY += (gridScrollTarget - gridScrollY) * 0.16;
 
@@ -303,7 +322,7 @@
         const g = gridTargetFor(t);
         t.gx += (g.x - t.gx) * 0.2;
         t.gy += (g.y - t.gy) * 0.2;
-        const gScale = Math.min(cell / BASE, cell / (BASE * t.work.aspect));
+        const gScale = 0.8 * Math.min(cell / BASE, cell / (BASE * t.work.aspect));  // 20% smaller in grid
 
         const relX = wrap(t.wx - cam.x + period / 2, period) - period / 2;
         const relY = wrap(t.wy - cam.y + period / 2, period) - period / 2;
@@ -325,11 +344,14 @@
         const s  = lerp(cDom, gScale, m);
         let op = lerp(t.op, 1, m);
 
-        // remember the on-screen rect so focusOn can dolly the overlay from here
+        // remember the on-screen rect so the overlay can track / dolly from here
         t.lpx = px; t.lpy = py; t.ls = s;
 
-        // focus: the whole field fades out behind the crisp overlay
-        if (focusAmt > 0.001) op *= (1 - focusAmt);
+        // focus: fade the field; the focused tile gives way to the crisp overlay
+        if (focusAmt > 0.001) {
+          if (t === focusTile) op *= (1 - overlayOp);
+          else op *= (1 - focusAmt);
+        }
 
         t.el.style.transform =
           `translate(${px.toFixed(1)}px, ${py.toFixed(1)}px) translate(-50%, -50%) scale(${s.toFixed(4)})`;
@@ -344,6 +366,27 @@
         // don't let invisible tiles intercept clicks
         const pe = oq < 0.04 ? 'none' : 'auto';
         if (pe !== t.lastPE) { t.el.style.pointerEvents = pe; t.lastPE = pe; }
+      }
+
+      // crisp full-size overlay. Canvas: track the focused tile's live rect as
+      // the camera dollies (scale ≤ 1 ⇒ only downscaled ⇒ sharp). Grid: dolly
+      // the overlay from the snapshot rect to the fit.
+      if (focusAmt > 0.0005 && focusTile) {
+        let tx, ty, sc;
+        if (focusMode === 'canvas') {
+          sc = Math.min(1, (BASE * focusTile.ls) / fstart.restH);
+          tx = focusTile.lpx - cx;
+          ty = focusTile.lpy - cy;
+        } else {
+          const fa = focusAmt;
+          tx = (fstart.sx - cx) * (1 - fa);
+          ty = (fstart.sy - cy) * (1 - fa);
+          sc = 1 - (1 - fa) * (1 - fstart.scale);
+        }
+        els.focusImg.style.transform = `translate(${tx.toFixed(1)}px, ${ty.toFixed(1)}px) scale(${sc.toFixed(4)})`;
+        els.focusview.style.opacity = overlayOp;
+      } else if (els.focusview.style.opacity !== '0') {
+        els.focusview.style.opacity = '0';
       }
 
       requestAnimationFrame(frame);
