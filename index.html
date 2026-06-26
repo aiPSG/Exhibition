@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="description" content="Exhibition — an infinite canvas of works that can be re-arranged into a sortable grid." />
+  <title>Exhibition</title>
+  <link rel="preconnect" href="https://picsum.photos" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Top bar -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand__dot" aria-hidden="true"></span>
+      <span class="brand__name">Exhibition</span>
+      <span class="brand__count" id="workCount">—</span>
+    </div>
+
+    <div class="modeswitch" role="tablist" aria-label="View mode">
+      <button class="modeswitch__btn is-active" data-mode="canvas" role="tab" aria-selected="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M4 9h16M4 15h16M9 4v16M15 4v16" stroke="currentColor" stroke-width="1" opacity=".5"/></svg>
+        <span>Canvas</span>
+      </button>
+      <button class="modeswitch__btn" data-mode="grid" role="tab" aria-selected="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6.5" height="6.5" rx="1" fill="currentColor"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1" fill="currentColor"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1" fill="currentColor"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1" fill="currentColor"/></svg>
+        <span>Grid</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Sort / filter bar (grid mode) -->
+  <div class="sortbar" id="sortbar" aria-hidden="true">
+    <span class="sortbar__label">Sort</span>
+    <div class="sortbar__group" id="sortGroup" role="group" aria-label="Sort criteria">
+      <button class="chip is-active" data-sort="name">Name</button>
+      <button class="chip" data-sort="color">Color</button>
+      <button class="chip" data-sort="category">Category</button>
+      <button class="chip" data-sort="mood">Mood</button>
+      <button class="chip" data-sort="client">Client</button>
+    </div>
+    <button class="dir" id="dirBtn" title="Toggle sort direction" aria-label="Toggle sort direction">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+  </div>
+
+  <!-- Infinite canvas -->
+  <main class="canvas" id="canvas" aria-label="Infinite canvas">
+    <div class="canvas__plane" id="plane"></div>
+    <div class="canvas__hint" id="canvasHint">Drag to explore · scroll to pan · click a work for details</div>
+  </main>
+
+  <!-- Grid -->
+  <section class="grid" id="grid" aria-label="Grid of works" hidden></section>
+
+  <!-- Detail overlay -->
+  <div class="detail" id="detail" hidden>
+    <button class="detail__close" id="detailClose" aria-label="Close">&times;</button>
+    <div class="detail__inner">
+      <div class="detail__media">
+        <img id="detailImg" alt="" />
+      </div>
+      <div class="detail__meta">
+        <h2 id="detailTitle"></h2>
+        <dl class="detail__facts" id="detailFacts"></dl>
+      </div>
+    </div>
+  </div>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
