@@ -331,6 +331,7 @@ body.mode-grid .tile:hover .tile__label { opacity: 1; }
 
 body.mode-focus .canvas { cursor: zoom-out; }
 body.mode-focus .topbar, body.mode-focus .sortbar { opacity: 0; pointer-events: none; transition: opacity .4s; }
+body.mode-focus .tile__label { opacity: 0 !important; }   /* focus bar carries the caption */
 
 @media (prefers-reduced-motion: reduce) {
   * { transition-duration: .01ms !important; animation-duration: .01ms !important; }

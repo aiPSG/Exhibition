@@ -71,9 +71,9 @@
 
     const [rw, rh] = RATIOS[Math.floor(rand() * RATIOS.length)];
     const aspect = rw / rh;
-    const long = 640;
-    const aw = aspect >= 1 ? long : Math.round(long * aspect);
-    const ah = aspect >= 1 ? Math.round(long / aspect) : long;
+    const dims = (long) => aspect >= 1
+      ? `${long}/${Math.round(long / aspect)}`
+      : `${Math.round(long * aspect)}/${long}`;
 
     const title = WORDS[i % WORDS.length] + SUFFIX[Math.floor(i / WORDS.length)];
 
@@ -88,7 +88,8 @@
       client:   CLIENTS[Math.floor(rand() * CLIENTS.length)],
       year:     2018 + Math.floor(rand() * 8),
       aspect,
-      img:      `https://picsum.photos/seed/exh-${i + 1}/${aw}/${ah}`
+      img:      `https://picsum.photos/seed/exh-${i + 1}/${dims(640)}`,   // field / grid
+      imgHi:    `https://picsum.photos/seed/exh-${i + 1}/${dims(1600)}`   // full screen
     });
   }
 

@@ -83,11 +83,9 @@
     // view morph: 0 = canvas, 1 = grid
     let morph = 0, morphTarget = 0;
 
-    // focus (fly-to-fit)
-    let focusActive = false, focusReturning = false, focusTile = null, focusAmt = 0;
-    const camTarget = { x: 0, y: 0, z: 0 };
-    const preCam = { x: 0, y: 0, z: 0 };
-    let prevView = 'canvas';
+    // focus: a screen-space dolly to full screen that works from either view
+    // (the clicked tile scales up to centre, the rest fade in place)
+    let focusActive = false, focusTile = null, focusAmt = 0;
 
     // grid layout
     let cols = 4, cell = 200, stride = 222, gridLeft = 0, gridTop = 96;
@@ -214,47 +212,32 @@
       };
     }
 
-    /* ---- focus (fly-to-fit) -------------------------------------------- */
-    function computeFocusTarget(t) {
-      const relX = wrap(t.wx - cam.x + period / 2, period) - period / 2;
-      const relY = wrap(t.wy - cam.y + period / 2, period) - period / 2;
-      camTarget.x = cam.x + relX;
-      camTarget.y = cam.y + relY;
-
-      const depthNow = wrap((cam.z - t.wz) + 40, PZ) - 40;
-      // contain: dolly until the binding dimension fills FIT of the frame
-      const fitDepth = Math.max(
-        (t.size * focal) / (2 * cy * FIT),
-        (t.size * t.work.aspect * focal) / (2 * cx * FIT)
-      );
-      camTarget.z = cam.z + (fitDepth - depthNow);
-    }
-
+    /* ---- focus (screen-space dolly to full screen) --------------------- */
     function focusOn(t) {
       if (focusActive) return;
-      focusActive = true; focusReturning = false; focusTile = t;
-      prevView = morphTarget === 1 ? 'grid' : 'canvas';
-      preCam.x = cam.x; preCam.y = cam.y; preCam.z = cam.z;
+      focusActive = true; focusTile = t;
+      // freeze any field momentum so the work returns to the same spot on exit
       vel.x = vel.y = vel.z = tvel.x = tvel.y = tvel.z = scrollAccum = 0;
-      morphTarget = 0;                       // fly back into canvas space
-      computeFocusTarget(t);
       els.body.classList.add('mode-focus');
       els.hint.classList.add('is-hidden');
       els.focusSwatch.style.background = t.work.color;
       els.focusTitle.textContent = t.work.title;
       els.focusFacts.textContent = factsLine(t.work);
       els.focusbar.classList.add('is-on');
+      // swap in a higher-resolution image so it's crisp full screen
+      if (t.work.imgHi && !t.hiLoaded) {
+        const hi = new Image();
+        hi.onload = () => { t.img.src = t.work.imgHi; t.img.classList.add('is-loaded'); t.hiLoaded = true; };
+        hi.src = t.work.imgHi;
+      }
     }
     function exitFocus() {
-      if (!focusActive || focusReturning) return;
-      focusReturning = true;
-      morphTarget = prevView === 'grid' ? 1 : 0;
+      if (!focusActive) return;
+      focusActive = false;
       els.body.classList.remove('mode-focus');
       els.focusbar.classList.remove('is-on');
     }
-    function toggleFocus(t) {
-      if (focusActive) exitFocus(); else focusOn(t);
-    }
+    function toggleFocus(t) { if (focusActive) exitFocus(); else focusOn(t); }
 
     /* ---- per-frame ------------------------------------------------------ */
     function simCamera() {
@@ -277,23 +260,14 @@
       }
       const m = easeInOut(morph);
 
-      // focus camera + spotlight amount
-      const focusGoal = (focusActive && !focusReturning) ? 1 : 0;
+      // focus dolly amount (0..1). The camera is frozen while focusing so the
+      // work returns to exactly where it left when you exit.
+      const focusGoal = focusActive ? 1 : 0;
       focusAmt += (focusGoal - focusAmt) * 0.09;
-      if (focusAmt < 0.001 && focusGoal === 0) focusAmt = 0;
+      if (Math.abs(focusGoal - focusAmt) < 0.001) focusAmt = focusGoal;
+      if (focusAmt === 0) focusTile = null;
 
-      if (focusActive) {
-        const tgt = focusReturning ? preCam : camTarget;
-        cam.x += (tgt.x - cam.x) * 0.085;
-        cam.y += (tgt.y - cam.y) * 0.085;
-        cam.z += (tgt.z - cam.z) * 0.085;
-        if (focusReturning &&
-            Math.abs(cam.x - tgt.x) + Math.abs(cam.y - tgt.y) + Math.abs(cam.z - tgt.z) < 0.6) {
-          focusActive = false; focusReturning = false; focusTile = null;
-        }
-      } else if (morph < 0.002) {
-        simCamera();
-      }
+      if (!focusActive && focusAmt < 0.002 && morph < 0.002) simCamera();
 
       gridScrollY += (gridScrollTarget - gridScrollY) * 0.16;
 
@@ -320,15 +294,22 @@
         if (depth <= 2) target = 0;
         t.op += (target - t.op) * OPACITY_LERP;
 
-        const px = lerp(csx, t.gx, m);
-        const py = lerp(csy, t.gy, m);
-        const s  = lerp(cDom, gScale, m);
-        let op   = lerp(t.op, 1, m);
+        let px = lerp(csx, t.gx, m);
+        let py = lerp(csy, t.gy, m);
+        let s  = lerp(cDom, gScale, m);
+        let op = lerp(t.op, 1, m);
 
-        // spotlight: focused tile stays, the rest fade out
+        // focus: the chosen work dollies to centre + full screen, the rest fade
         if (focusAmt > 0.001) {
-          if (t === focusTile) op = Math.max(op, focusAmt);
-          else op *= (1 - focusAmt);
+          if (t === focusTile) {
+            const fitS = Math.min((2 * cy * FIT) / BASE, (2 * cx * FIT) / (BASE * t.work.aspect));
+            px = lerp(px, cx, focusAmt);
+            py = lerp(py, cy, focusAmt);
+            s  = lerp(s, fitS, focusAmt);
+            op = lerp(op, 1, focusAmt);
+          } else {
+            op *= (1 - focusAmt);
+          }
         }
 
         t.el.style.transform =
