@@ -11,7 +11,7 @@
   const els = {
     body:        document.body,
     canvas:      document.getElementById('canvas'),
-    plane:       document.getElementById('plane'),
+    scene:       document.getElementById('scene'),
     hint:        document.getElementById('canvasHint'),
     grid:        document.getElementById('grid'),
     sortbar:     document.getElementById('sortbar'),
@@ -35,80 +35,133 @@
     probe.src = src;
   }
 
-  /* ======================================================== INFINITE CANVAS */
+  /* ======================================================== INFINITE CANVAS
+     A true 3D field: tiles scattered across x/y *and* z. CSS perspective gives
+     automatic parallax + perspective scaling; JS adds depth-of-field blur and
+     an opacity fade so works vanish into the distance and recycle seamlessly
+     as you travel forward (wheel / vertical swipe). Dragging pans the field. */
   const Canvas = (function () {
-    let tiles = [];            // { el, img, baseX, baseY, work }
-    let cols = 0, rows = 0, tileW = 0, tileH = 0, totalW = 0, totalH = 0;
-    let offX = 0, offY = 0;    // pan offset
-    let velX = 0, velY = 0;    // inertia
-    let dragging = false, moved = 0;
+    // Depth model (translateZ values, px). Focus plane is sharp; everything
+    // fore/aft of it blurs. Far + front ends fade to 0 so the z-wrap is unseen.
+    const PERSP    = 1200;
+    const Z_FOCUS  = -360;
+    const Z_FRONT  = 520;     // recycle point (closest); faded out before here
+    const Z_BACK   = -2760;   // spawn point (vanishing distance); faded in
+    const Z_PERIOD = Z_FRONT - Z_BACK;
+    const MAX_BLUR = 13;
+
+    let tiles = [];
+    let cols = 0, rows = 0, cellW = 0, cellH = 0, worldW = 0, worldH = 0;
+    let panX = 0, panY = 0, velX = 0, velY = 0;
+    let travel = 0, velT = 0;
+    let dragging = false, axis = null, isTouch = false, moved = 0;
     let pointerId = null, lastX = 0, lastY = 0;
     let raf = null, active = false;
 
-    const wrap = (v, size) => ((v % size) + size) % size;
+    const wrap   = (v, s) => ((v % s) + s) % s;
+    const clamp  = (v, a, b) => v < a ? a : v > b ? b : v;
+    const AMBIENT = 0.45;     // gentle constant forward drift, so it's alive
 
-    function tileSize() {
-      const w = window.innerWidth;
-      if (w < 560) return 180;
-      if (w < 900) return 230;
-      return 300;
+    // Deterministic PRNG so the scatter is identical every load.
+    function rng(seed) {
+      let a = seed >>> 0;
+      return () => {
+        a = (a + 0x6D2B79F5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
     }
 
     function build() {
       const vw = window.innerWidth, vh = window.innerHeight;
-      const gap = 28;
-      tileW = tileSize() + gap;
-      tileH = tileW;
-      document.documentElement.style.setProperty('--tile', tileSize() + 'px');
+      const small = vw < 700;
 
-      // Enough columns/rows to cover the viewport twice over so wrapping is seamless.
-      cols = Math.ceil((vw + 2 * tileW) / tileW) + 1;
-      rows = Math.ceil((vh + 2 * tileH) / tileH) + 1;
-      cols = Math.max(cols, 5);
-      rows = Math.max(rows, 5);
-      totalW = cols * tileW;
-      totalH = rows * tileH;
+      cellW = small ? 360 : 520;
+      cellH = small ? 320 : 440;
+      cols = Math.max(5, Math.round((vw * 1.5) / cellW) + 2);
+      rows = Math.max(4, Math.round((vh * 1.5) / cellH) + 2);
+      worldW = cols * cellW;
+      worldH = rows * cellH;
 
-      els.plane.innerHTML = '';
+      els.scene.innerHTML = '';
       tiles = [];
-      let n = 0;
+      const rand = rng(98765);
+      const PHI = 0.6180339887;
       const frag = document.createDocumentFragment();
+      let n = 0;
+
       for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
           const work = DATA[n % DATA.length];
-          n++;
+
+          // Scatter within the cell so it doesn't read as a grid.
+          const homeX = c * cellW + (rand() - 0.5) * cellW * 0.8;
+          const homeY = r * cellH + (rand() - 0.5) * cellH * 0.8;
+
+          // Spread depth phases evenly so all distances are populated at once.
+          const phase = (n * PHI) % 1;
+
+          // Mixed sizes; a few heroes read large when they pass close.
+          const hero = rand() < 0.16;
+          const w = (hero ? 360 : 180) + rand() * (hero ? 150 : 150);
+          const h = w / work.aspect;
+
           const el = document.createElement('div');
           el.className = 'tile';
-          el.style.width = tileSize() + 'px';
-          el.style.height = tileSize() + 'px';
+          el.style.width = w + 'px';
+          el.style.height = h + 'px';
           el.style.setProperty('--c', work.color);
+
           const img = document.createElement('img');
           img.alt = work.title;
           img.draggable = false;
           el.appendChild(img);
-          el.addEventListener('click', () => { if (moved < 6) openDetail(work); });
+          el.addEventListener('click', () => { if (moved < 7) openDetail(work); });
+
           frag.appendChild(el);
-          tiles.push({ el, img, baseX: c * tileW, baseY: r * tileH, work, loaded: false });
+          tiles.push({ el, img, homeX, homeY, phase, work,
+                       loaded: false, lastBlur: -1, lastOp: -1 });
+          n++;
         }
       }
-      els.plane.appendChild(frag);
-
-      // Start roughly centred on the cluster.
-      offX = -totalW / 2 + vw / 2;
-      offY = -totalH / 2 + vh / 2;
-      render(true);
+      els.scene.appendChild(frag);
+      render();
     }
 
-    function render(loadVisible) {
+    function render() {
       const vw = window.innerWidth, vh = window.innerHeight;
       for (let i = 0; i < tiles.length; i++) {
         const t = tiles[i];
-        const x = wrap(t.baseX + offX + tileW, totalW) - tileW;
-        const y = wrap(t.baseY + offY + tileH, totalH) - tileH;
-        t.el.style.transform = `translate3d(${x}px, ${y}px, 0)`;
 
-        if (loadVisible && !t.loaded &&
-            x > -tileW && x < vw + tileW && y > -tileH && y < vh + tileH) {
+        // Depth: march along z with travel, wrap into [Z_BACK, Z_FRONT).
+        const z = Z_BACK + wrap(t.phase * Z_PERIOD + travel, Z_PERIOD);
+
+        // Lateral world position, panned + toroidally wrapped, centred on origin.
+        const x = wrap(t.homeX + panX, worldW) - worldW / 2;
+        const y = wrap(t.homeY + panY, worldH) - worldH / 2;
+
+        t.el.style.transform =
+          `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, ${z.toFixed(1)}px) translate(-50%, -50%)`;
+
+        // Depth of field: sharp at focus, blurrier with distance either way.
+        const d = z - Z_FOCUS;
+        const blur = d <= 0 ? Math.min(MAX_BLUR, -d / 185)
+                            : Math.min(MAX_BLUR, d / 130);
+
+        // Fade in from the far plane and out before the front recycle point.
+        let op = 1;
+        if (z < Z_BACK + 620)  op = Math.min(op, (z - Z_BACK) / 620);
+        if (z > Z_FRONT - 420)  op = Math.min(op, (Z_FRONT - z) / 420);
+        op = clamp(op, 0, 1);
+
+        // Only touch the DOM when values actually change (cheaper).
+        const bq = Math.round(blur * 2) / 2;
+        if (bq !== t.lastBlur) { t.el.style.filter = bq < 0.2 ? 'none' : `blur(${bq}px)`; t.lastBlur = bq; }
+        const oq = Math.round(op * 100) / 100;
+        if (oq !== t.lastOp) { t.el.style.opacity = oq; t.lastOp = oq; }
+
+        if (!t.loaded && oq > 0.04) {
           t.loaded = true;
           loadImg(t.img, t.work.img);
         }
@@ -118,23 +171,25 @@
     function loop() {
       if (!active) return;
       if (!dragging) {
-        offX += velX;
-        offY += velY;
-        velX *= 0.93;
-        velY *= 0.93;
+        panX += velX; panY += velY;
+        velX *= 0.92; velY *= 0.92;
         if (Math.abs(velX) < 0.05) velX = 0;
         if (Math.abs(velY) < 0.05) velY = 0;
       }
-      render(true);
+      travel += velT + AMBIENT;
+      velT *= 0.9;
+      if (Math.abs(velT) < 0.05) velT = 0;
+      render();
       raf = requestAnimationFrame(loop);
     }
 
+    /* ---- input ------------------------------------------------------ */
     function onDown(e) {
-      dragging = true;
-      moved = 0;
+      dragging = true; moved = 0; axis = null;
+      isTouch = e.pointerType === 'touch';
       pointerId = e.pointerId;
       lastX = e.clientX; lastY = e.clientY;
-      velX = velY = 0;
+      velX = velY = velT = 0;
       els.canvas.classList.add('is-dragging');
       els.canvas.setPointerCapture(pointerId);
       hideHint();
@@ -143,9 +198,16 @@
       if (!dragging) return;
       const dx = e.clientX - lastX, dy = e.clientY - lastY;
       lastX = e.clientX; lastY = e.clientY;
-      offX += dx; offY += dy;
-      velX = dx; velY = dy;
       moved += Math.abs(dx) + Math.abs(dy);
+
+      // Touch has no wheel: lock each swipe to pan (horizontal) or travel
+      // (vertical) so phones can still fly through the depth.
+      if (isTouch) {
+        if (axis === null && moved > 12) axis = Math.abs(dy) > Math.abs(dx) ? 'z' : 'xy';
+        if (axis === 'z') { travel -= dy * 1.4; velT = -dy * 1.4; return; }
+      }
+      panX += dx; panY += dy;
+      velX = dx; velY = dy;
     }
     function onUp() {
       if (!dragging) return;
@@ -155,17 +217,13 @@
     }
     function onWheel(e) {
       e.preventDefault();
-      offX -= e.deltaX;
-      offY -= e.deltaY;
-      velX = -e.deltaX * 0.25;
-      velY = -e.deltaY * 0.25;
+      travel += e.deltaY * 0.9;
+      velT = e.deltaY * 0.5;
       hideHint();
     }
 
     let hintTimer = null;
-    function hideHint() {
-      els.hint.classList.add('is-hidden');
-    }
+    function hideHint() { els.hint.classList.add('is-hidden'); }
 
     function start() {
       if (active) return;
@@ -173,7 +231,7 @@
       if (!tiles.length) build();
       els.hint.classList.remove('is-hidden');
       clearTimeout(hintTimer);
-      hintTimer = setTimeout(hideHint, 4200);
+      hintTimer = setTimeout(hideHint, 4600);
       raf = requestAnimationFrame(loop);
     }
     function stop() {

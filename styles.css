@@ -176,15 +176,28 @@ body.mode-grid .sortbar { transform: translate(-50%, 0); opacity: 1; }
   cursor: grab;
   touch-action: none;
   background:
-    radial-gradient(120% 90% at 50% -10%, #1a1a1f 0%, var(--bg) 60%);
+    radial-gradient(130% 100% at 50% 42%, #1c1c22 0%, #101013 55%, #0a0a0c 100%);
 }
 .canvas.is-dragging { cursor: grabbing; }
 body.mode-grid .canvas { display: none; }
 
-.canvas__plane {
+/* The 3D stage. Perspective + per-tile translateZ gives real depth,
+   parallax, and the receding "vanishing point". */
+.canvas__scene {
   position: absolute;
-  top: 0; left: 0;
-  will-change: transform;
+  inset: 0;
+  perspective: 1200px;
+  perspective-origin: 50% 48%;
+  transform-style: preserve-3d;
+}
+
+/* Soft vignette deepens the sense of distance. */
+.canvas__vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 20;
+  background: radial-gradient(125% 95% at 50% 48%, transparent 52%, rgba(8,8,11,.55) 100%);
 }
 
 .canvas__hint {
@@ -237,8 +250,19 @@ body.mode-grid .canvas { display: none; }
   border-radius: inherit;
   pointer-events: none;
 }
-.canvas .tile { transition: filter .4s, opacity .4s; }
-.canvas .tile:hover img { transform: scale(1.06); }
+/* Canvas tiles are positioned in 3D by JS every frame, so no CSS transitions
+   on transform/filter/opacity (they would fight the animation loop). */
+.canvas .tile {
+  top: 50%;
+  left: 50%;
+  border-radius: 3px;
+  transition: none;
+  backface-visibility: hidden;
+  box-shadow: 0 34px 70px -24px rgba(0,0,0,.75);
+  will-change: transform, filter, opacity;
+}
+.canvas .tile::after { box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
+.canvas .tile:hover img { transform: scale(1.05); }
 
 /* ---------------------------------------------------------------- the grid */
 .grid {

@@ -25,6 +25,9 @@
   const MOODS      = ['Calm', 'Vibrant', 'Melancholic', 'Playful', 'Bold'];
   const CLIENTS    = ['Aerie Studio', 'Northwind', 'Marlowe & Co.', 'Format Press', 'Helios Lab', 'Self-initiated'];
 
+  // Mixed aspect ratios (w:h) so the canvas reads like a real hang, not a grid.
+  const RATIOS = [[4, 5], [5, 4], [1, 1], [3, 4], [4, 3], [2, 3], [3, 2], [16, 10], [10, 16]];
+
   // Hue -> readable colour name (rough buckets).
   function colorName(h) {
     if (h < 15 || h >= 345) return 'Red';
@@ -67,6 +70,14 @@
     const hue = Math.floor(rand() * 360);
     const sat = 55 + Math.floor(rand() * 35);
     const lig = 45 + Math.floor(rand() * 20);
+
+    // Pick an aspect ratio and derive image dimensions (~640px long edge).
+    const [rw, rh] = RATIOS[Math.floor(rand() * RATIOS.length)];
+    const aspect = rw / rh;
+    const long = 640;
+    const aw = aspect >= 1 ? long : Math.round(long * aspect);
+    const ah = aspect >= 1 ? Math.round(long / aspect) : long;
+
     works.push({
       id: i + 1,
       title: TITLES[i],
@@ -77,7 +88,8 @@
       mood:     MOODS[Math.floor(rand() * MOODS.length)],
       client:   CLIENTS[Math.floor(rand() * CLIENTS.length)],
       year:     2018 + Math.floor(rand() * 8),
-      img:      `https://picsum.photos/seed/exh-${i + 1}/640/640`
+      aspect,
+      img:      `https://picsum.photos/seed/exh-${i + 1}/${aw}/${ah}`
     });
   }
 
