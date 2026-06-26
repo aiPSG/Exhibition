@@ -97,7 +97,7 @@
     let sortKey = 'name', sortDir = 1;
     const orderPos = new Array(DATA.length).fill(0);
 
-    let dragging = false, isTouch = false, moved = 0;
+    let dragging = false, isTouch = false, moved = 0, multi = false;
     let lastX = 0, lastY = 0;
     const pointers = new Map();
     let pinchDist = 0;
@@ -188,7 +188,8 @@
           size: SIZE_MIN + rand() * SIZE_SPAN,
           op: 0, gx: 0, gy: 0, lastOp: -1, lastZ: 0, lastPE: '', loaded: false
         };
-        el.addEventListener('click', () => { if (moved < 7) toggleFocus(t); });
+        // NB: clicks are handled in onUp (pointer capture swallows the
+        // element's own click event), so no per-tile click listener here.
 
         frag.appendChild(el);
         tiles.push(t);
@@ -354,13 +355,15 @@
     function onDown(e) {
       els.canvas.setPointerCapture(e.pointerId);
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      dragging = true; moved = 0;
+      if (pointers.size === 1) { moved = 0; multi = false; }
+      dragging = true;
       isTouch = e.pointerType === 'touch';
       lastX = e.clientX; lastY = e.clientY;
       tvel.x = tvel.y = tvel.z = 0;
       if (pointers.size === 2) {
         const [a, b] = [...pointers.values()];
         pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
+        multi = true;
       }
       els.canvas.classList.add('is-dragging');
       hideHint();
@@ -394,11 +397,22 @@
     function onUp(e) {
       pointers.delete(e.pointerId);
       if (pointers.size < 2) pinchDist = 0;
+      try { els.canvas.releasePointerCapture(e.pointerId); } catch (_) {}
       if (pointers.size === 0) {
         dragging = false;
         els.canvas.classList.remove('is-dragging');
+        // a tap (not a drag, not part of a pinch) selects / deselects a work
+        if (!multi && moved < 9) handleTap(e.clientX, e.clientY);
       }
-      try { els.canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+    }
+
+    function handleTap(x, y) {
+      if (focusActive) { exitFocus(); return; }
+      const el = document.elementFromPoint(x, y);
+      const tileEl = el && el.closest ? el.closest('.tile') : null;
+      if (!tileEl) return;
+      const t = tiles.find(tt => tt.el === tileEl);
+      if (t) focusOn(t);
     }
     function onWheel(e) {
       e.preventDefault();
