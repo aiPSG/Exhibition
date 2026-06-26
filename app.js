@@ -32,7 +32,10 @@
     focusSwatch: document.getElementById('focusSwatch'),
     focusTitle:  document.getElementById('focusTitle'),
     focusFacts:  document.getElementById('focusFacts'),
-    focusClose:  document.getElementById('focusClose')
+    focusClose:  document.getElementById('focusClose'),
+    loader:      document.getElementById('loader'),
+    loaderBar:   document.getElementById('loaderBar'),
+    loaderPct:   document.getElementById('loaderPct')
   };
 
   els.workCount.textContent = String(DATA.length).padStart(2, '0') + ' works';
@@ -196,6 +199,8 @@
       els.scene.appendChild(frag);
       computeOrder();
       tiles.forEach(t => { const g = gridTargetFor(t); t.gx = g.x; t.gy = g.y; });
+      // eager-load every low-res image so the field is fully populated
+      tiles.forEach(t => { t.loaded = true; loadImg(t.img, t.work.img); });
     }
 
     function computeOrder() {
@@ -224,11 +229,11 @@
       els.focusTitle.textContent = t.work.title;
       els.focusFacts.textContent = factsLine(t.work);
       els.focusbar.classList.add('is-on');
-      // swap in a higher-resolution image so it's crisp full screen
+      // swap in the (pre-loaded) full-resolution image so it's crisp
       if (t.work.imgHi && !t.hiLoaded) {
-        const hi = new Image();
-        hi.onload = () => { t.img.src = t.work.imgHi; t.img.classList.add('is-loaded'); t.hiLoaded = true; };
-        hi.src = t.work.imgHi;
+        t.hiLoaded = true;
+        t.img.src = t.work.imgHi;
+        t.img.classList.add('is-loaded');
       }
     }
     function exitFocus() {
@@ -325,8 +330,6 @@
         // don't let invisible tiles intercept clicks
         const pe = oq < 0.04 ? 'none' : 'auto';
         if (pe !== t.lastPE) { t.el.style.pointerEvents = pe; t.lastPE = pe; }
-
-        if (!t.loaded && oq > 0.03) { t.loaded = true; loadImg(t.img, t.work.img); }
       }
 
       requestAnimationFrame(frame);
@@ -483,5 +486,40 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape') Field.exitFocus(); });
 
   /* =================================================================== BOOT */
-  Field.init();
+  // Preload every full-resolution image (concurrency-limited, references not
+  // retained so we warm the cache without decoding 96 huge bitmaps at once).
+  function preloadImages(urls, onProgress) {
+    return new Promise(resolve => {
+      const total = urls.length;
+      if (!total) { resolve(); return; }
+      let i = 0, done = 0;
+      const CONCURRENCY = 6;
+      const start = () => {
+        if (i >= total) return;
+        const url = urls[i++];
+        const img = new Image();
+        const fin = () => {
+          img.onload = img.onerror = null;
+          done++; onProgress(done / total);
+          if (done >= total) resolve(); else start();
+        };
+        img.onload = fin; img.onerror = fin;
+        img.decoding = 'async';
+        img.src = url;
+      };
+      for (let k = 0; k < Math.min(CONCURRENCY, total); k++) start();
+    });
+  }
+
+  Field.init();                          // build the field behind the loader
+
+  preloadImages(DATA.map(w => w.imgHi), p => {
+    const pct = Math.round(p * 100);
+    els.loaderBar.style.width = pct + '%';
+    els.loaderPct.textContent = pct + '%';
+  }).then(() => {
+    els.loaderBar.style.width = '100%';
+    els.loaderPct.textContent = '100%';
+    setTimeout(() => els.loader.classList.add('is-done'), 300);
+  });
 })();

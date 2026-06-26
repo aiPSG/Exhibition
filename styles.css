@@ -35,6 +35,51 @@ body { overflow: hidden; }
 img { display: block; max-width: 100%; }
 button { font: inherit; color: inherit; cursor: pointer; }
 
+/* ----------------------------------------------------------- loading screen */
+.loader {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  transition: opacity .6s var(--ease);
+}
+.loader.is-done { opacity: 0; pointer-events: none; }
+.loader__inner { width: min(360px, 76vw); text-align: center; }
+.loader__brand {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: .42em;
+  text-indent: .42em;
+  color: var(--ink);
+  margin-bottom: 22px;
+}
+.loader__track {
+  height: 2px;
+  width: 100%;
+  background: rgba(255,255,255,.12);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.loader__bar {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width .25s var(--ease);
+}
+.loader__meta {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 12px;
+  font-size: 11px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------------------------------------------------------------- top bar */
 .topbar {
   position: fixed;
