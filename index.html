@@ -60,6 +60,12 @@
     <div class="canvas__hint" id="canvasHint">Drag to pan · scroll to travel · pinch to zoom · click a work for details</div>
   </main>
 
+  <!-- Full-screen image overlay (laid out at full size so hi-res stays crisp;
+       a transform-scaled tile would rasterise at its tiny layout size) -->
+  <div class="focusview" id="focusview" aria-hidden="true">
+    <img id="focusImg" alt="" />
+  </div>
+
   <!-- Focus caption — appears when a work is flown to full screen -->
   <div class="focusbar" id="focusbar">
     <span class="focusbar__swatch" id="focusSwatch" aria-hidden="true"></span>

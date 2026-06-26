@@ -28,6 +28,8 @@
     sortGroup:   document.getElementById('sortGroup'),
     dirBtn:      document.getElementById('dirBtn'),
     workCount:   document.getElementById('workCount'),
+    focusview:   document.getElementById('focusview'),
+    focusImg:    document.getElementById('focusImg'),
     focusbar:    document.getElementById('focusbar'),
     focusSwatch: document.getElementById('focusSwatch'),
     focusTitle:  document.getElementById('focusTitle'),
@@ -86,9 +88,10 @@
     // view morph: 0 = canvas, 1 = grid
     let morph = 0, morphTarget = 0;
 
-    // focus: a screen-space dolly to full screen that works from either view
-    // (the clicked tile scales up to centre, the rest fade in place)
+    // focus: a crisp full-size <img> overlay dollies in from the clicked
+    // tile's screen rect; the field fades out behind it.
     let focusActive = false, focusTile = null, focusAmt = 0;
+    const fstart = { sx: 0, sy: 0, scale: 1 };   // overlay start transform
 
     // grid layout
     let cols = 4, cell = 200, stride = 222, gridLeft = 0, gridTop = 96;
@@ -187,7 +190,8 @@
           el, img, work, idx, label: label.querySelector('[data-sub]'),
           wx: rand() * period, wy: rand() * period, wz: rand() * PZ,
           size: SIZE_MIN + rand() * SIZE_SPAN,
-          op: 0, gx: 0, gy: 0, lastOp: -1, lastZ: 0, lastPE: '', loaded: false
+          op: 0, gx: 0, gy: 0, lpx: 0, lpy: 0, ls: 0,
+          lastOp: -1, lastZ: 0, lastPE: '', loaded: false
         };
         // NB: clicks are handled in onUp (pointer capture swallows the
         // element's own click event), so no per-tile click listener here.
@@ -221,20 +225,25 @@
     function focusOn(t) {
       if (focusActive) return;
       focusActive = true; focusTile = t;
-      // freeze any field momentum so the work returns to the same spot on exit
       vel.x = vel.y = vel.z = tvel.x = tvel.y = tvel.z = scrollAccum = 0;
+
+      // Snapshot the tile's on-screen rect so the crisp overlay can dolly in
+      // from exactly there. The overlay rests at a 90% contain fit.
+      const vw = 2 * cx, vh = 2 * cy;
+      const restH = Math.min(0.9 * vh, (0.9 * vw) / t.work.aspect);
+      const tileH = BASE * t.ls;
+      fstart.sx = t.lpx; fstart.sy = t.lpy;
+      fstart.scale = restH > 0 ? tileH / restH : 0.2;
+
+      els.focusImg.src = t.work.imgHi || t.work.img;     // pre-loaded → crisp
+      els.focusImg.alt = t.work.title;
+
       els.body.classList.add('mode-focus');
       els.hint.classList.add('is-hidden');
       els.focusSwatch.style.background = t.work.color;
       els.focusTitle.textContent = t.work.title;
       els.focusFacts.textContent = factsLine(t.work);
       els.focusbar.classList.add('is-on');
-      // swap in the (pre-loaded) full-resolution image so it's crisp
-      if (t.work.imgHi && !t.hiLoaded) {
-        t.hiLoaded = true;
-        t.img.src = t.work.imgHi;
-        t.img.classList.add('is-loaded');
-      }
     }
     function exitFocus() {
       if (!focusActive) return;
@@ -272,6 +281,18 @@
       if (Math.abs(focusGoal - focusAmt) < 0.001) focusAmt = focusGoal;
       if (focusAmt === 0) focusTile = null;
 
+      // dolly the crisp overlay between the tile's rect and the full-screen fit
+      if (focusAmt > 0.0005) {
+        const fa = focusAmt;
+        const tx = (fstart.sx - cx) * (1 - fa);
+        const ty = (fstart.sy - cy) * (1 - fa);
+        const sc = 1 - (1 - fa) * (1 - fstart.scale);
+        els.focusImg.style.transform = `translate(${tx.toFixed(1)}px, ${ty.toFixed(1)}px) scale(${sc.toFixed(4)})`;
+        els.focusview.style.opacity = Math.min(1, fa * 1.2);
+      } else if (els.focusview.style.opacity !== '0') {
+        els.focusview.style.opacity = '0';
+      }
+
       if (!focusActive && focusAmt < 0.002 && morph < 0.002) simCamera();
 
       gridScrollY += (gridScrollTarget - gridScrollY) * 0.16;
@@ -299,23 +320,16 @@
         if (depth <= 2) target = 0;
         t.op += (target - t.op) * OPACITY_LERP;
 
-        let px = lerp(csx, t.gx, m);
-        let py = lerp(csy, t.gy, m);
-        let s  = lerp(cDom, gScale, m);
+        const px = lerp(csx, t.gx, m);
+        const py = lerp(csy, t.gy, m);
+        const s  = lerp(cDom, gScale, m);
         let op = lerp(t.op, 1, m);
 
-        // focus: the chosen work dollies to centre + full screen, the rest fade
-        if (focusAmt > 0.001) {
-          if (t === focusTile) {
-            const fitS = Math.min((2 * cy * FIT) / BASE, (2 * cx * FIT) / (BASE * t.work.aspect));
-            px = lerp(px, cx, focusAmt);
-            py = lerp(py, cy, focusAmt);
-            s  = lerp(s, fitS, focusAmt);
-            op = lerp(op, 1, focusAmt);
-          } else {
-            op *= (1 - focusAmt);
-          }
-        }
+        // remember the on-screen rect so focusOn can dolly the overlay from here
+        t.lpx = px; t.lpy = py; t.ls = s;
+
+        // focus: the whole field fades out behind the crisp overlay
+        if (focusAmt > 0.001) op *= (1 - focusAmt);
 
         t.el.style.transform =
           `translate(${px.toFixed(1)}px, ${py.toFixed(1)}px) translate(-50%, -50%) scale(${s.toFixed(4)})`;

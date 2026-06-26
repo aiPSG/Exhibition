@@ -374,6 +374,27 @@ body.mode-grid .tile:hover .tile__label { opacity: 1; }
 }
 .focusbar__close:hover { background: rgba(255,255,255,.14); }
 
+/* Full-screen image overlay (the crisp one). JS drives its transform/opacity. */
+.focusview {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  pointer-events: none;            /* taps fall through to the canvas → exit */
+}
+.focusview img {
+  max-width: 90vw;
+  max-height: 90vh;
+  width: auto;
+  height: auto;
+  border-radius: 3px;
+  transform-origin: 50% 50%;
+  will-change: transform;
+  box-shadow: 0 40px 110px rgba(0,0,0,.65);
+}
+
 body.mode-focus .canvas { cursor: zoom-out; }
 body.mode-focus .topbar, body.mode-focus .sortbar { opacity: 0; pointer-events: none; transition: opacity .4s; }
 body.mode-focus .tile__label { opacity: 0 !important; }   /* focus bar carries the caption */
