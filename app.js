@@ -5,11 +5,14 @@
      • Infinite canvas — a camera is simulated in JS and flies through an
        infinitely-tiled 3D field. Motion + vanishing use the exact constants
        from edoardolunardi/infinite-canvas (velocity lerp/decay/clamp, wheel
-       accumulation, depth fade 140→260 squared, fov 60, sizes 12–20). The
-       reference has no blur, so neither do we — distance reads through fade
-       and perspective scaling alone.
+       accumulation, depth fade 140→260 squared, fov 60, sizes 12–20). No blur,
+       like the reference — depth reads through fade + perspective alone.
+       Tiles are z-index sorted by depth every frame so nearer works occlude
+       farther ones correctly.
      • Grid — the same tiles animate (morph) into a sortable grid instead of a
-       hard switch. Sorting re-flows them with eased motion.
+       hard switch.
+   Clicking a work flies the camera to centre on it and dollies in until the
+   image fits the frame (contain), fading the rest of the field away.
    ========================================================================= */
 (function () {
   'use strict';
@@ -25,11 +28,11 @@
     sortGroup:   document.getElementById('sortGroup'),
     dirBtn:      document.getElementById('dirBtn'),
     workCount:   document.getElementById('workCount'),
-    detail:      document.getElementById('detail'),
-    detailImg:   document.getElementById('detailImg'),
-    detailTitle: document.getElementById('detailTitle'),
-    detailFacts: document.getElementById('detailFacts'),
-    detailClose: document.getElementById('detailClose')
+    focusbar:    document.getElementById('focusbar'),
+    focusSwatch: document.getElementById('focusSwatch'),
+    focusTitle:  document.getElementById('focusTitle'),
+    focusFacts:  document.getElementById('focusFacts'),
+    focusClose:  document.getElementById('focusClose')
   };
 
   els.workCount.textContent = String(DATA.length).padStart(2, '0') + ' works';
@@ -67,6 +70,7 @@
     /* ---- our framing of that world ------------------------------------ */
     const PZ   = 360;   // depth tiling period (> FADE_END so the z-wrap is unseen)
     const BASE = 220;   // tile DOM height in px (scaled per frame)
+    const FIT  = 0.9;   // focus: image fills 90% of the limiting axis
 
     let tiles = [];
     const cam = { x: 0, y: 0, z: 0 };
@@ -77,7 +81,13 @@
     let focal = 0, cx = 0, cy = 0, period = 360;
 
     // view morph: 0 = canvas, 1 = grid
-    let morph = 0, morphTarget = 0, justArranged = false;
+    let morph = 0, morphTarget = 0;
+
+    // focus (fly-to-fit)
+    let focusActive = false, focusReturning = false, focusTile = null, focusAmt = 0;
+    const camTarget = { x: 0, y: 0, z: 0 };
+    const preCam = { x: 0, y: 0, z: 0 };
+    let prevView = 'canvas';
 
     // grid layout
     let cols = 4, cell = 200, stride = 222, gridLeft = 0, gridTop = 96;
@@ -87,11 +97,10 @@
     let sortKey = 'name', sortDir = 1;
     const orderPos = new Array(DATA.length).fill(0);
 
-    let dragging = false, axis = null, isTouch = false, moved = 0;
+    let dragging = false, isTouch = false, moved = 0;
     let lastX = 0, lastY = 0;
     const pointers = new Map();
     let pinchDist = 0;
-    let raf = null;
 
     function rng(seed) {
       let a = seed >>> 0;
@@ -110,7 +119,6 @@
       mood:     (a, b) => a.mood.localeCompare(b.mood) || a.title.localeCompare(b.title),
       client:   (a, b) => a.client.localeCompare(b.client) || a.title.localeCompare(b.title)
     };
-
     function subFor(work) {
       switch (sortKey) {
         case 'color':    return work.colorName;
@@ -120,6 +128,9 @@
         default:         return work.category + ' · ' + work.year;
       }
     }
+    function factsLine(work) {
+      return `${work.category} · ${work.mood} · ${work.client} · ${work.colorName} · ${work.year}`;
+    }
 
     /* ---- build ---------------------------------------------------------- */
     function metrics() {
@@ -127,12 +138,9 @@
       focal = (vh / 2) / Math.tan((FOV_DEG / 2) * Math.PI / 180);
       cx = vw / 2; cy = vh / 2;
 
-      // lateral tiling period — wide enough that wraps happen off-screen for
-      // the still-visible depth band (beyond it, fade hides any seam).
       const halfW = (150 * (vw / 2)) / focal;
       period = Math.max(300, halfW * 2.6);
 
-      // grid layout
       const small = vw < 700;
       const pad = small ? 16 : 30;
       const gap = small ? 14 : 22;
@@ -174,21 +182,20 @@
           `<span class="tile__swatch" style="background:${work.color}"></span>`;
         el.appendChild(label);
 
-        el.addEventListener('click', () => { if (moved < 7) openDetail(work); });
-
-        frag.appendChild(el);
-        tiles.push({
+        const t = {
           el, img, work, idx, label: label.querySelector('[data-sub]'),
-          // world position, randomly seeded across the tiling cell
           wx: rand() * period, wy: rand() * period, wz: rand() * PZ,
           size: SIZE_MIN + rand() * SIZE_SPAN,
-          op: 0, gx: 0, gy: 0, lastOp: -1, loaded: false
-        });
+          op: 0, gx: 0, gy: 0, lastOp: -1, lastZ: 0, lastPE: '', loaded: false
+        };
+        el.addEventListener('click', () => { if (moved < 7) toggleFocus(t); });
+
+        frag.appendChild(el);
+        tiles.push(t);
       });
 
       els.scene.appendChild(frag);
       computeOrder();
-      // seed grid positions so the first arrange flies from canvas → grid
       tiles.forEach(t => { const g = gridTargetFor(t); t.gx = g.x; t.gy = g.y; });
     }
 
@@ -197,7 +204,6 @@
         .sort((a, b) => COMPARATORS[sortKey](DATA[a], DATA[b]) * sortDir);
       sorted.forEach((workIdx, pos) => { orderPos[workIdx] = pos; });
     }
-
     function gridTargetFor(t) {
       const pos = orderPos[t.idx];
       const r = Math.floor(pos / cols), c = pos % cols;
@@ -207,86 +213,148 @@
       };
     }
 
+    /* ---- focus (fly-to-fit) -------------------------------------------- */
+    function computeFocusTarget(t) {
+      const relX = wrap(t.wx - cam.x + period / 2, period) - period / 2;
+      const relY = wrap(t.wy - cam.y + period / 2, period) - period / 2;
+      camTarget.x = cam.x + relX;
+      camTarget.y = cam.y + relY;
+
+      const depthNow = wrap((cam.z - t.wz) + 40, PZ) - 40;
+      // contain: dolly until the binding dimension fills FIT of the frame
+      const fitDepth = Math.max(
+        (t.size * focal) / (2 * cy * FIT),
+        (t.size * t.work.aspect * focal) / (2 * cx * FIT)
+      );
+      camTarget.z = cam.z + (fitDepth - depthNow);
+    }
+
+    function focusOn(t) {
+      if (focusActive) return;
+      focusActive = true; focusReturning = false; focusTile = t;
+      prevView = morphTarget === 1 ? 'grid' : 'canvas';
+      preCam.x = cam.x; preCam.y = cam.y; preCam.z = cam.z;
+      vel.x = vel.y = vel.z = tvel.x = tvel.y = tvel.z = scrollAccum = 0;
+      morphTarget = 0;                       // fly back into canvas space
+      computeFocusTarget(t);
+      els.body.classList.add('mode-focus');
+      els.hint.classList.add('is-hidden');
+      els.focusSwatch.style.background = t.work.color;
+      els.focusTitle.textContent = t.work.title;
+      els.focusFacts.textContent = factsLine(t.work);
+      els.focusbar.classList.add('is-on');
+    }
+    function exitFocus() {
+      if (!focusActive || focusReturning) return;
+      focusReturning = true;
+      morphTarget = prevView === 'grid' ? 1 : 0;
+      els.body.classList.remove('mode-focus');
+      els.focusbar.classList.remove('is-on');
+    }
+    function toggleFocus(t) {
+      if (focusActive) exitFocus(); else focusOn(t);
+    }
+
     /* ---- per-frame ------------------------------------------------------ */
     function simCamera() {
       tvel.z += scrollAccum;
       tvel.x = clamp(tvel.x, -MAX_VELOCITY, MAX_VELOCITY);
       tvel.y = clamp(tvel.y, -MAX_VELOCITY, MAX_VELOCITY);
       tvel.z = clamp(tvel.z, -MAX_VELOCITY, MAX_VELOCITY);
-
       vel.x = lerp(vel.x, tvel.x, VELOCITY_LERP);
       vel.y = lerp(vel.y, tvel.y, VELOCITY_LERP);
       vel.z = lerp(vel.z, tvel.z, VELOCITY_LERP);
-
       cam.x += vel.x; cam.y += vel.y; cam.z += vel.z;
-
       tvel.x *= VELOCITY_DECAY; tvel.y *= VELOCITY_DECAY; tvel.z *= VELOCITY_DECAY;
       scrollAccum *= SCROLL_DECAY;
     }
 
     function frame() {
-      // ease morph
       if (morph !== morphTarget) {
         morph += (morphTarget - morph) * 0.1;
         if (Math.abs(morphTarget - morph) < 0.0015) morph = morphTarget;
       }
       const m = easeInOut(morph);
-      const canvasLive = morph < 0.002;
 
-      if (canvasLive) simCamera();
+      // focus camera + spotlight amount
+      const focusGoal = (focusActive && !focusReturning) ? 1 : 0;
+      focusAmt += (focusGoal - focusAmt) * 0.09;
+      if (focusAmt < 0.001 && focusGoal === 0) focusAmt = 0;
+
+      if (focusActive) {
+        const tgt = focusReturning ? preCam : camTarget;
+        cam.x += (tgt.x - cam.x) * 0.085;
+        cam.y += (tgt.y - cam.y) * 0.085;
+        cam.z += (tgt.z - cam.z) * 0.085;
+        if (focusReturning &&
+            Math.abs(cam.x - tgt.x) + Math.abs(cam.y - tgt.y) + Math.abs(cam.z - tgt.z) < 0.6) {
+          focusActive = false; focusReturning = false; focusTile = null;
+        }
+      } else if (morph < 0.002) {
+        simCamera();
+      }
+
       gridScrollY += (gridScrollTarget - gridScrollY) * 0.16;
-
-      const gridEase = justArranged ? 1 : 0.2;
-      justArranged = false;
 
       for (let i = 0; i < tiles.length; i++) {
         const t = tiles[i];
 
-        /* ---- grid target (eased so sorting re-flows smoothly) ---- */
         const g = gridTargetFor(t);
-        t.gx += (g.x - t.gx) * gridEase;
-        t.gy += (g.y - t.gy) * gridEase;
+        t.gx += (g.x - t.gx) * 0.2;
+        t.gy += (g.y - t.gy) * 0.2;
         const gScale = Math.min(cell / BASE, cell / (BASE * t.work.aspect));
 
-        /* ---- canvas projection ---- */
         const relX = wrap(t.wx - cam.x + period / 2, period) - period / 2;
         const relY = wrap(t.wy - cam.y + period / 2, period) - period / 2;
-        let depth = wrap((cam.z - t.wz) + 40, PZ) - 40;     // [-40, 320]
+        const depth = wrap((cam.z - t.wz) + 40, PZ) - 40;     // [-40, 320]
         const dd = Math.max(depth, 4);
         const pScale = focal / dd;
         const csx = cx + relX * pScale;
         const csy = cy - relY * pScale;
         const cDom = (t.size * pScale) / BASE;
 
-        // vanishing: squared depth fade, lerped — exactly the reference
         let target = depth <= FADE_START ? 1
                    : Math.max(0, 1 - (depth - FADE_START) / (FADE_END - FADE_START));
         target = target * target;
-        if (depth <= 2) target = 0;                          // behind camera
+        if (depth <= 2) target = 0;
         t.op += (target - t.op) * OPACITY_LERP;
 
-        /* ---- blend canvas → grid ---- */
         const px = lerp(csx, t.gx, m);
         const py = lerp(csy, t.gy, m);
         const s  = lerp(cDom, gScale, m);
-        const op = lerp(t.op, 1, m);
+        let op   = lerp(t.op, 1, m);
+
+        // spotlight: focused tile stays, the rest fade out
+        if (focusAmt > 0.001) {
+          if (t === focusTile) op = Math.max(op, focusAmt);
+          else op *= (1 - focusAmt);
+        }
 
         t.el.style.transform =
           `translate(${px.toFixed(1)}px, ${py.toFixed(1)}px) translate(-50%, -50%) scale(${s.toFixed(4)})`;
+
         const oq = Math.round(op * 100) / 100;
         if (oq !== t.lastOp) { t.el.style.opacity = oq; t.lastOp = oq; }
+
+        // depth sorting: nearer (smaller depth) paints on top
+        const zi = (t === focusTile && focusAmt > 0.01) ? 900000 : Math.round(100000 - depth * 10);
+        if (zi !== t.lastZ) { t.el.style.zIndex = zi; t.lastZ = zi; }
+
+        // don't let invisible tiles intercept clicks
+        const pe = oq < 0.04 ? 'none' : 'auto';
+        if (pe !== t.lastPE) { t.el.style.pointerEvents = pe; t.lastPE = pe; }
 
         if (!t.loaded && oq > 0.03) { t.loaded = true; loadImg(t.img, t.work.img); }
       }
 
-      raf = requestAnimationFrame(frame);
+      requestAnimationFrame(frame);
     }
 
     /* ---- input ---------------------------------------------------------- */
     function onDown(e) {
       els.canvas.setPointerCapture(e.pointerId);
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      dragging = true; moved = 0; axis = null;
+      dragging = true; moved = 0;
       isTouch = e.pointerType === 'touch';
       lastX = e.clientX; lastY = e.clientY;
       tvel.x = tvel.y = tvel.z = 0;
@@ -297,13 +365,11 @@
       els.canvas.classList.add('is-dragging');
       hideHint();
     }
-
     function onMove(e) {
       if (!pointers.has(e.pointerId)) return;
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
-      // two-finger pinch → travel in z (reference behaviour)
-      if (pointers.size === 2) {
+      if (pointers.size === 2 && !focusActive) {
         const [a, b] = [...pointers.values()];
         const d = Math.hypot(a.x - b.x, a.y - b.y);
         if (pinchDist) scrollAccum += (pinchDist - d) * PINCH_MULT;
@@ -316,7 +382,8 @@
       lastX = e.clientX; lastY = e.clientY;
       moved += Math.abs(dx) + Math.abs(dy);
 
-      if (morphTarget === 1) {                 // grid: drag scrolls the grid
+      if (focusActive) return;                 // no panning while focused
+      if (morphTarget === 1) {
         gridScrollTarget = clamp(gridScrollTarget - dy, 0, gridMaxScroll);
         return;
       }
@@ -324,7 +391,6 @@
       tvel.x -= dx * k;
       tvel.y += dy * k;
     }
-
     function onUp(e) {
       pointers.delete(e.pointerId);
       if (pointers.size < 2) pinchDist = 0;
@@ -334,14 +400,11 @@
       }
       try { els.canvas.releasePointerCapture(e.pointerId); } catch (_) {}
     }
-
     function onWheel(e) {
       e.preventDefault();
-      if (morphTarget === 1) {
-        gridScrollTarget = clamp(gridScrollTarget + e.deltaY, 0, gridMaxScroll);
-      } else {
-        scrollAccum += e.deltaY * WHEEL_MULT;
-      }
+      if (focusActive) return;
+      if (morphTarget === 1) gridScrollTarget = clamp(gridScrollTarget + e.deltaY, 0, gridMaxScroll);
+      else scrollAccum += e.deltaY * WHEEL_MULT;
       hideHint();
     }
 
@@ -350,6 +413,7 @@
 
     /* ---- public --------------------------------------------------------- */
     function setView(view) {
+      if (focusActive) exitFocus();
       morphTarget = view === 'grid' ? 1 : 0;
       if (view === 'grid') { gridScrollTarget = gridScrollY = 0; }
       els.body.classList.toggle('mode-grid', view === 'grid');
@@ -357,17 +421,13 @@
       if (view === 'grid') { clearTimeout(hintTimer); hideHint(); }
       else { els.hint.classList.remove('is-hidden'); clearTimeout(hintTimer); hintTimer = setTimeout(hideHint, 4600); }
     }
-
     function setSort(key) {
       if (key === sortKey) return;
-      sortKey = key;
-      computeOrder();
-      justArranged = false;                    // ease into the new arrangement
+      sortKey = key; computeOrder();
       tiles.forEach(t => { t.label.textContent = subFor(t.work); });
     }
     function toggleDir() {
-      sortDir *= -1;
-      computeOrder();
+      sortDir *= -1; computeOrder();
       tiles.forEach(t => { t.label.textContent = subFor(t.work); });
     }
 
@@ -384,16 +444,19 @@
         clearTimeout(rt);
         rt = setTimeout(() => {
           metrics();
-          tiles.forEach(t => { const g = gridTargetFor(t); t.gx = g.x; t.gy = g.y; });
+          tiles.forEach(t => {
+            t.el.style.width = (BASE * t.work.aspect) + 'px';
+            const g = gridTargetFor(t); t.gx = g.x; t.gy = g.y;
+          });
         }, 180);
       });
 
       els.hint.classList.remove('is-hidden');
       hintTimer = setTimeout(hideHint, 4600);
-      raf = requestAnimationFrame(frame);
+      requestAnimationFrame(frame);
     }
 
-    return { init, setView, setSort, toggleDir };
+    return { init, setView, setSort, toggleDir, exitFocus };
   })();
 
   /* ============================================================ UI WIRING */
@@ -416,31 +479,13 @@
     chip.classList.add('is-active');
     Field.setSort(chip.dataset.sort);
   });
-
   els.dirBtn.addEventListener('click', () => {
     els.dirBtn.classList.toggle('is-desc');
     Field.toggleDir();
   });
 
-  /* ========================================================= DETAIL OVERLAY */
-  function openDetail(work) {
-    els.detailImg.src = work.img;
-    els.detailImg.alt = work.title;
-    els.detailTitle.textContent = work.title;
-    els.detailFacts.innerHTML =
-      row('Category', work.category) +
-      row('Mood', work.mood) +
-      row('Client', work.client) +
-      row('Colour', `<span class="swatch" style="background:${work.color}"></span>${work.colorName}`) +
-      row('Year', work.year);
-    els.detail.hidden = false;
-  }
-  function row(label, value) { return `<dt>${label}</dt><dd>${value}</dd>`; }
-  function closeDetail() { els.detail.hidden = true; }
-
-  els.detailClose.addEventListener('click', closeDetail);
-  els.detail.addEventListener('click', e => { if (e.target === els.detail) closeDetail(); });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDetail(); });
+  els.focusClose.addEventListener('click', () => Field.exitFocus());
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') Field.exitFocus(); });
 
   /* =================================================================== BOOT */
   Field.init();

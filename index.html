@@ -51,18 +51,14 @@
     <div class="canvas__hint" id="canvasHint">Drag to pan · scroll to travel · pinch to zoom · click a work for details</div>
   </main>
 
-  <!-- Detail overlay -->
-  <div class="detail" id="detail" hidden>
-    <button class="detail__close" id="detailClose" aria-label="Close">&times;</button>
-    <div class="detail__inner">
-      <div class="detail__media">
-        <img id="detailImg" alt="" />
-      </div>
-      <div class="detail__meta">
-        <h2 id="detailTitle"></h2>
-        <dl class="detail__facts" id="detailFacts"></dl>
-      </div>
+  <!-- Focus caption — appears when a work is flown to full screen -->
+  <div class="focusbar" id="focusbar">
+    <span class="focusbar__swatch" id="focusSwatch" aria-hidden="true"></span>
+    <div class="focusbar__text">
+      <span class="focusbar__title" id="focusTitle"></span>
+      <span class="focusbar__facts" id="focusFacts"></span>
     </div>
+    <button class="focusbar__close" id="focusClose" aria-label="Exit (Esc)">Close&nbsp;&times;</button>
   </div>
 
   <script src="data.js"></script>
