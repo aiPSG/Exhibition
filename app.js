@@ -239,15 +239,15 @@
       fstart.scale = fstart.restH > 0 ? (BASE * t.ls) / fstart.restH : 0.2;
 
       if (focusMode === 'canvas') {
-        // real camera move: centre on the work, then dolly until it fills the fit
+        // Dolly the camera forward (z only) for the fly-through. We deliberately
+        // do NOT pan x/y to centre — that would make the toroidally-wrapped
+        // field jump (flicker). The overlay does the centring instead.
         preCam.x = cam.x; preCam.y = cam.y; preCam.z = cam.z;
-        const relX = wrap(t.wx - cam.x + period / 2, period) - period / 2;
-        const relY = wrap(t.wy - cam.y + period / 2, period) - period / 2;
-        camTarget.x = cam.x + relX;
-        camTarget.y = cam.y + relY;
+        camTarget.x = cam.x;
+        camTarget.y = cam.y;
         const depthNow = wrap((cam.z - t.wz) + 40, PZ) - 40;
-        const depthFit = (t.size * focal) / fstart.restH;   // projects to restH tall
-        camTarget.z = cam.z + (depthFit - depthNow);
+        const depthFit = (t.size * focal) / fstart.restH;
+        camTarget.z = cam.z + (depthFit - depthNow);   // fly toward the work
       }
 
       els.focusImg.src = t.work.imgHi || t.work.img;     // pre-loaded → crisp
@@ -310,9 +310,7 @@
         if (!focusActive && focusAmt < 0.002 && morph < 0.002) simCamera();
       }
 
-      // overlay fade: canvas ramps in fast (then just tracks the tile), grid
-      // follows the dolly progress directly.
-      const overlayOp = focusMode === 'canvas' ? Math.min(1, focusAmt * 4) : focusAmt;
+      const overlayOp = focusAmt;   // crossfade the crisp overlay in as we dolly
 
       gridScrollY += (gridScrollTarget - gridScrollY) * 0.16;
 
@@ -347,11 +345,8 @@
         // remember the on-screen rect so the overlay can track / dolly from here
         t.lpx = px; t.lpy = py; t.ls = s;
 
-        // focus: fade the field; the focused tile gives way to the crisp overlay
-        if (focusAmt > 0.001) {
-          if (t === focusTile) op *= (1 - overlayOp);
-          else op *= (1 - focusAmt);
-        }
+        // focus: the whole field (including the clicked tile) fades behind the overlay
+        if (focusAmt > 0.001) op *= (1 - focusAmt);
 
         t.el.style.transform =
           `translate(${px.toFixed(1)}px, ${py.toFixed(1)}px) translate(-50%, -50%) scale(${s.toFixed(4)})`;
@@ -360,7 +355,7 @@
         if (oq !== t.lastOp) { t.el.style.opacity = oq; t.lastOp = oq; }
 
         // depth sorting: nearer (smaller depth) paints on top
-        const zi = (t === focusTile && focusAmt > 0.01) ? 900000 : Math.round(100000 - depth * 10);
+        const zi = Math.round(100000 - depth * 10);
         if (zi !== t.lastZ) { t.el.style.zIndex = zi; t.lastZ = zi; }
 
         // don't let invisible tiles intercept clicks
@@ -368,21 +363,15 @@
         if (pe !== t.lastPE) { t.el.style.pointerEvents = pe; t.lastPE = pe; }
       }
 
-      // crisp full-size overlay. Canvas: track the focused tile's live rect as
-      // the camera dollies (scale ≤ 1 ⇒ only downscaled ⇒ sharp). Grid: dolly
-      // the overlay from the snapshot rect to the fit.
-      if (focusAmt > 0.0005 && focusTile) {
-        let tx, ty, sc;
-        if (focusMode === 'canvas') {
-          sc = Math.min(1, (BASE * focusTile.ls) / fstart.restH);
-          tx = focusTile.lpx - cx;
-          ty = focusTile.lpy - cy;
-        } else {
-          const fa = focusAmt;
-          tx = (fstart.sx - cx) * (1 - fa);
-          ty = (fstart.sy - cy) * (1 - fa);
-          sc = 1 - (1 - fa) * (1 - fstart.scale);
-        }
+      // Crisp full-size overlay: a smooth snapshot dolly from the clicked tile's
+      // rect to the centred full-screen fit. Independent of the camera, so it
+      // always ends perfectly centred (no clipping) and only ever downscales
+      // (scale ≤ 1 ⇒ sharp).
+      if (focusAmt > 0.0005) {
+        const fa = easeInOut(focusAmt);
+        const tx = (fstart.sx - cx) * (1 - fa);
+        const ty = (fstart.sy - cy) * (1 - fa);
+        const sc = 1 - (1 - fa) * (1 - fstart.scale);
         els.focusImg.style.transform = `translate(${tx.toFixed(1)}px, ${ty.toFixed(1)}px) scale(${sc.toFixed(4)})`;
         els.focusview.style.opacity = overlayOp;
       } else if (els.focusview.style.opacity !== '0') {
