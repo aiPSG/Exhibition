@@ -42,11 +42,57 @@
 
   els.workCount.textContent = String(DATA.length).padStart(2, '0') + ' works';
 
+  // Throttled image loader with retries. Firing ~200 requests at once makes a
+  // remote host (picsum) drop some, leaving black/fallback tiles — so we cap
+  // concurrency and retry transient failures. References aren't retained, so
+  // this only warms the HTTP cache (no decoded-bitmap RAM build-up).
+  const ImageQueue = (function () {
+    const queue = [];
+    let active = 0;
+    const MAX = 8;
+    function startOne(item) {
+      active++;
+      const img = new Image();
+      img.decoding = 'async';
+      const done = ok => {
+        active--; img.onload = img.onerror = null;
+        if (ok) { if (item.cb) item.cb(true, item.src); }
+        else if (item.attempts < 2) { item.attempts++; queue.push(item); }   // retry later
+        else if (item.cb) item.cb(false, item.src);
+        pump();
+      };
+      img.onload = () => done(true);
+      img.onerror = () => setTimeout(() => done(false), 300 * (item.attempts + 1));
+      img.src = item.src;
+    }
+    function pump() { while (active < MAX && queue.length) startOne(queue.shift()); }
+    function enqueue(src, cb, front) {
+      const item = { src, cb, attempts: 0 };
+      if (front) queue.unshift(item); else queue.push(item);
+      pump();
+    }
+    return { enqueue };
+  })();
+
+  // Load a field/grid image (via the queue) then fade it into its <img>.
   function loadImg(imgEl, src) {
-    const probe = new Image();
-    probe.onload = () => { imgEl.src = src; requestAnimationFrame(() => imgEl.classList.add('is-loaded')); };
-    probe.onerror = () => {};
-    probe.src = src;
+    ImageQueue.enqueue(src, ok => {
+      if (ok) { imgEl.src = src; requestAnimationFrame(() => imgEl.classList.add('is-loaded')); }
+      bumpProgress();                        // count toward the loading bar either way
+    });
+  }
+
+  // Loading-bar progress across every image (low-res field + hi-res focus).
+  let imgTotal = DATA.length * 2, imgDone = 0, revealed = false;
+  function bumpProgress() {
+    imgDone++;
+    const pct = Math.min(100, Math.round((imgDone / imgTotal) * 100));
+    els.loaderBar.style.width = pct + '%';
+    els.loaderPct.textContent = pct + '%';
+    if (imgDone >= imgTotal && !revealed) {
+      revealed = true;
+      setTimeout(() => els.loader.classList.add('is-done'), 300);
+    }
   }
 
   const lerp  = (a, b, t) => a + (b - a) * t;
@@ -93,6 +139,7 @@
     // stays sharp. Grid view: a screen-space overlay dolly (unchanged).
     let focusActive = false, focusReturning = false, focusTile = null, focusAmt = 0;
     let focusMode = 'canvas';
+    let focusReady = false;        // hi-res decoded? (gates the overlay → no flash)
     let flight = false;            // canvas focus: suspend wrapping so the camera
                                    // can fly straight at the work without it jumping
     const fstart = { sx: 0, sy: 0, scale: 1, restH: 1 };
@@ -260,8 +307,17 @@
         camTarget.z = t.fz + depthFit;
       }
 
-      els.focusImg.src = t.work.imgHi || t.work.img;     // pre-loaded → crisp
+      // Only reveal the overlay once the hi-res has actually decoded, so there's
+      // no empty/stale flash during the low→hi handoff.
+      focusReady = false;
       els.focusImg.alt = t.work.title;
+      els.focusImg.src = t.work.imgHi || t.work.img;     // pre-loaded → from cache
+      if (els.focusImg.decode) {
+        els.focusImg.decode().then(() => { focusReady = true; }, () => { focusReady = true; });
+      } else {
+        els.focusImg.onload = () => { focusReady = true; };
+        if (els.focusImg.complete) focusReady = true;
+      }
 
       els.body.classList.add('mode-focus');
       els.hint.classList.add('is-hidden');
@@ -320,9 +376,11 @@
         if (!focusActive && focusAmt < 0.002 && morph < 0.002) simCamera();
       }
 
-      // overlay crossfade: canvas ramps in fast then tracks the centring tile,
-      // grid follows the dolly directly.
-      const overlayOp = focusMode === 'canvas' ? Math.min(1, focusAmt * 4) : focusAmt;
+      // overlay crossfade — held at 0 until the hi-res is decoded (no flash);
+      // canvas ramps in fast then tracks the centring tile, grid follows the dolly.
+      const overlayOp = !focusReady ? 0
+                      : focusMode === 'canvas' ? Math.min(1, focusAmt * 6)
+                      : focusAmt;
 
       gridScrollY += (gridScrollTarget - gridScrollY) * 0.16;
 
@@ -563,40 +621,9 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape') Field.exitFocus(); });
 
   /* =================================================================== BOOT */
-  // Preload every full-resolution image (concurrency-limited, references not
-  // retained so we warm the cache without decoding 96 huge bitmaps at once).
-  function preloadImages(urls, onProgress) {
-    return new Promise(resolve => {
-      const total = urls.length;
-      if (!total) { resolve(); return; }
-      let i = 0, done = 0;
-      const CONCURRENCY = 6;
-      const start = () => {
-        if (i >= total) return;
-        const url = urls[i++];
-        const img = new Image();
-        const fin = () => {
-          img.onload = img.onerror = null;
-          done++; onProgress(done / total);
-          if (done >= total) resolve(); else start();
-        };
-        img.onload = fin; img.onerror = fin;
-        img.decoding = 'async';
-        img.src = url;
-      };
-      for (let k = 0; k < Math.min(CONCURRENCY, total); k++) start();
-    });
-  }
+  Field.init();                          // builds the field (enqueues low-res first)
 
-  Field.init();                          // build the field behind the loader
-
-  preloadImages(DATA.map(w => w.imgHi), p => {
-    const pct = Math.round(p * 100);
-    els.loaderBar.style.width = pct + '%';
-    els.loaderPct.textContent = pct + '%';
-  }).then(() => {
-    els.loaderBar.style.width = '100%';
-    els.loaderPct.textContent = '100%';
-    setTimeout(() => els.loader.classList.add('is-done'), 300);
-  });
+  // Then preload every full-resolution image through the same throttled+retrying
+  // queue. References aren't retained → warms the cache, no decoded-RAM build-up.
+  DATA.forEach(w => ImageQueue.enqueue(w.imgHi, bumpProgress));
 })();
