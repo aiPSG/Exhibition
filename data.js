@@ -2,7 +2,7 @@
    Exhibition — dataset
    Each work carries curatorial metadata so it can be sorted/grouped:
      title, hue (0–360 for colour sorting), color (hex), colorName,
-     category, mood, client, year.
+     category, mood, client, year, aspect.
    Images are deterministic placeholders (picsum seed = id); the metadata
    colour is used as a fallback background so the grid stays meaningful
    even if an image fails to load.
@@ -10,25 +10,25 @@
 (function () {
   'use strict';
 
-  // Curated vocabularies the catalogue draws from.
-  const TITLES = [
+  const COUNT = 96;            // pool size: denser canvas field + richer grid
+
+  const WORDS = [
     'Drift', 'Halcyon', 'Aperture', 'Undertow', 'Vesper', 'Meridian',
     'Cinder', 'Lustre', 'Threshold', 'Murmur', 'Solstice', 'Fathom',
     'Ember', 'Quartz', 'Verdant', 'Nocturne', 'Cascade', 'Pollen',
     'Static', 'Marrow', 'Glimmer', 'Tide', 'Coil', 'Plume',
     'Relic', 'Saffron', 'Hush', 'Pivot', 'Bloom', 'Granite',
     'Reverie', 'Signal', 'Velour', 'Crest', 'Ashen', 'Lattice',
-    'Drape', 'Forge', 'Mirage', 'Cobalt'
+    'Drape', 'Forge', 'Mirage', 'Cobalt', 'Anvil', 'Brume',
+    'Cusp', 'Dune', 'Fable', 'Gossamer', 'Indigo', 'Juniper'
   ];
+  const SUFFIX = ['', ' II', ' III'];   // keeps titles unique past WORDS.length
 
   const CATEGORIES = ['Photography', 'Painting', 'Sculpture', 'Digital', 'Typography'];
   const MOODS      = ['Calm', 'Vibrant', 'Melancholic', 'Playful', 'Bold'];
   const CLIENTS    = ['Aerie Studio', 'Northwind', 'Marlowe & Co.', 'Format Press', 'Helios Lab', 'Self-initiated'];
+  const RATIOS     = [[4, 5], [5, 4], [1, 1], [3, 4], [4, 3], [2, 3], [3, 2], [16, 10], [10, 16]];
 
-  // Mixed aspect ratios (w:h) so the canvas reads like a real hang, not a grid.
-  const RATIOS = [[4, 5], [5, 4], [1, 1], [3, 4], [4, 3], [2, 3], [3, 2], [16, 10], [10, 16]];
-
-  // Hue -> readable colour name (rough buckets).
   function colorName(h) {
     if (h < 15 || h >= 345) return 'Red';
     if (h < 45)  return 'Orange';
@@ -41,7 +41,6 @@
     return 'Red';
   }
 
-  // HSL -> hex for the fallback swatch.
   function hslHex(h, s, l) {
     s /= 100; l /= 100;
     const k = n => (n + h / 30) % 12;
@@ -53,7 +52,6 @@
     return `#${f(0)}${f(8)}${f(4)}`;
   }
 
-  // Small deterministic PRNG so the catalogue is identical on every load.
   function mulberry32(a) {
     return function () {
       a |= 0; a = (a + 0x6D2B79F5) | 0;
@@ -66,21 +64,22 @@
   const rand = mulberry32(20260626);
   const works = [];
 
-  for (let i = 0; i < TITLES.length; i++) {
+  for (let i = 0; i < COUNT; i++) {
     const hue = Math.floor(rand() * 360);
     const sat = 55 + Math.floor(rand() * 35);
     const lig = 45 + Math.floor(rand() * 20);
 
-    // Pick an aspect ratio and derive image dimensions (~640px long edge).
     const [rw, rh] = RATIOS[Math.floor(rand() * RATIOS.length)];
     const aspect = rw / rh;
     const long = 640;
     const aw = aspect >= 1 ? long : Math.round(long * aspect);
     const ah = aspect >= 1 ? Math.round(long / aspect) : long;
 
+    const title = WORDS[i % WORDS.length] + SUFFIX[Math.floor(i / WORDS.length)];
+
     works.push({
       id: i + 1,
-      title: TITLES[i],
+      title,
       hue,
       color: hslHex(hue, sat, lig),
       colorName: colorName(hue),

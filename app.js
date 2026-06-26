@@ -1,7 +1,15 @@
 /* =========================================================================
    Exhibition — app
-   - Infinite canvas: a toroidally-wrapped plane of tiles with drag + inertia
-   - Grid: every work laid out responsively, re-sortable with a FLIP animation
+
+   One pool of tiles serves BOTH views:
+     • Infinite canvas — a camera is simulated in JS and flies through an
+       infinitely-tiled 3D field. Motion + vanishing use the exact constants
+       from edoardolunardi/infinite-canvas (velocity lerp/decay/clamp, wheel
+       accumulation, depth fade 140→260 squared, fov 60, sizes 12–20). The
+       reference has no blur, so neither do we — distance reads through fade
+       and perspective scaling alone.
+     • Grid — the same tiles animate (morph) into a sortable grid instead of a
+       hard switch. Sorting re-flows them with eased motion.
    ========================================================================= */
 (function () {
   'use strict';
@@ -13,7 +21,6 @@
     canvas:      document.getElementById('canvas'),
     scene:       document.getElementById('scene'),
     hint:        document.getElementById('canvasHint'),
-    grid:        document.getElementById('grid'),
     sortbar:     document.getElementById('sortbar'),
     sortGroup:   document.getElementById('sortGroup'),
     dirBtn:      document.getElementById('dirBtn'),
@@ -27,42 +34,65 @@
 
   els.workCount.textContent = String(DATA.length).padStart(2, '0') + ' works';
 
-  /* Lazily fade images in once decoded. */
   function loadImg(imgEl, src) {
     const probe = new Image();
     probe.onload = () => { imgEl.src = src; requestAnimationFrame(() => imgEl.classList.add('is-loaded')); };
-    probe.onerror = () => {};               // fallback colour stays visible
+    probe.onerror = () => {};
     probe.src = src;
   }
 
-  /* ======================================================== INFINITE CANVAS
-     A true 3D field: tiles scattered across x/y *and* z. CSS perspective gives
-     automatic parallax + perspective scaling; JS adds depth-of-field blur and
-     an opacity fade so works vanish into the distance and recycle seamlessly
-     as you travel forward (wheel / vertical swipe). Dragging pans the field. */
-  const Canvas = (function () {
-    // Depth model (translateZ values, px). Focus plane is sharp; everything
-    // fore/aft of it blurs. Far + front ends fade to 0 so the z-wrap is unseen.
-    const PERSP    = 1200;
-    const Z_FOCUS  = -360;
-    const Z_FRONT  = 520;     // recycle point (closest); faded out before here
-    const Z_BACK   = -2760;   // spawn point (vanishing distance); faded in
-    const Z_PERIOD = Z_FRONT - Z_BACK;
-    const MAX_BLUR = 13;
+  const lerp  = (a, b, t) => a + (b - a) * t;
+  const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+  const wrap  = (v, s) => ((v % s) + s) % s;
+  const easeInOut = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+  /* ====================================================== THE UNIFIED FIELD */
+  const Field = (function () {
+    /* ---- constants copied from the reference repo --------------------- */
+    const VELOCITY_LERP  = 0.16;
+    const VELOCITY_DECAY = 0.9;
+    const MAX_VELOCITY   = 3.2;
+    const WHEEL_MULT     = 0.006;
+    const SCROLL_DECAY   = 0.8;
+    const DRAG_MULT      = 0.025;
+    const TOUCH_MULT     = 0.02;
+    const PINCH_MULT     = 0.006;
+    const FADE_START     = 140;
+    const FADE_END       = 260;
+    const OPACITY_LERP   = 0.18;
+    const SIZE_MIN       = 12;
+    const SIZE_SPAN      = 8;     // size = 12 + r*8  →  12..20
+    const FOV_DEG        = 60;
+
+    /* ---- our framing of that world ------------------------------------ */
+    const PZ   = 360;   // depth tiling period (> FADE_END so the z-wrap is unseen)
+    const BASE = 220;   // tile DOM height in px (scaled per frame)
 
     let tiles = [];
-    let cols = 0, rows = 0, cellW = 0, cellH = 0, worldW = 0, worldH = 0;
-    let panX = 0, panY = 0, velX = 0, velY = 0;
-    let travel = 0, velT = 0;
+    const cam = { x: 0, y: 0, z: 0 };
+    const vel = { x: 0, y: 0, z: 0 };
+    const tvel = { x: 0, y: 0, z: 0 };
+    let scrollAccum = 0;
+
+    let focal = 0, cx = 0, cy = 0, period = 360;
+
+    // view morph: 0 = canvas, 1 = grid
+    let morph = 0, morphTarget = 0, justArranged = false;
+
+    // grid layout
+    let cols = 4, cell = 200, stride = 222, gridLeft = 0, gridTop = 96;
+    let gridScrollY = 0, gridScrollTarget = 0, gridMaxScroll = 0;
+
+    // sorting
+    let sortKey = 'name', sortDir = 1;
+    const orderPos = new Array(DATA.length).fill(0);
+
     let dragging = false, axis = null, isTouch = false, moved = 0;
-    let pointerId = null, lastX = 0, lastY = 0;
-    let raf = null, active = false;
+    let lastX = 0, lastY = 0;
+    const pointers = new Map();
+    let pinchDist = 0;
+    let raf = null;
 
-    const wrap   = (v, s) => ((v % s) + s) % s;
-    const clamp  = (v, a, b) => v < a ? a : v > b ? b : v;
-    const AMBIENT = 0.45;     // gentle constant forward drift, so it's alive
-
-    // Deterministic PRNG so the scatter is identical every load.
     function rng(seed) {
       let a = seed >>> 0;
       return () => {
@@ -73,194 +103,6 @@
       };
     }
 
-    function build() {
-      const vw = window.innerWidth, vh = window.innerHeight;
-      const small = vw < 700;
-
-      cellW = small ? 360 : 520;
-      cellH = small ? 320 : 440;
-      cols = Math.max(5, Math.round((vw * 1.5) / cellW) + 2);
-      rows = Math.max(4, Math.round((vh * 1.5) / cellH) + 2);
-      worldW = cols * cellW;
-      worldH = rows * cellH;
-
-      els.scene.innerHTML = '';
-      tiles = [];
-      const rand = rng(98765);
-      const PHI = 0.6180339887;
-      const frag = document.createDocumentFragment();
-      let n = 0;
-
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          const work = DATA[n % DATA.length];
-
-          // Scatter within the cell so it doesn't read as a grid.
-          const homeX = c * cellW + (rand() - 0.5) * cellW * 0.8;
-          const homeY = r * cellH + (rand() - 0.5) * cellH * 0.8;
-
-          // Spread depth phases evenly so all distances are populated at once.
-          const phase = (n * PHI) % 1;
-
-          // Mixed sizes; a few heroes read large when they pass close.
-          const hero = rand() < 0.16;
-          const w = (hero ? 360 : 180) + rand() * (hero ? 150 : 150);
-          const h = w / work.aspect;
-
-          const el = document.createElement('div');
-          el.className = 'tile';
-          el.style.width = w + 'px';
-          el.style.height = h + 'px';
-          el.style.setProperty('--c', work.color);
-
-          const img = document.createElement('img');
-          img.alt = work.title;
-          img.draggable = false;
-          el.appendChild(img);
-          el.addEventListener('click', () => { if (moved < 7) openDetail(work); });
-
-          frag.appendChild(el);
-          tiles.push({ el, img, homeX, homeY, phase, work,
-                       loaded: false, lastBlur: -1, lastOp: -1 });
-          n++;
-        }
-      }
-      els.scene.appendChild(frag);
-      render();
-    }
-
-    function render() {
-      const vw = window.innerWidth, vh = window.innerHeight;
-      for (let i = 0; i < tiles.length; i++) {
-        const t = tiles[i];
-
-        // Depth: march along z with travel, wrap into [Z_BACK, Z_FRONT).
-        const z = Z_BACK + wrap(t.phase * Z_PERIOD + travel, Z_PERIOD);
-
-        // Lateral world position, panned + toroidally wrapped, centred on origin.
-        const x = wrap(t.homeX + panX, worldW) - worldW / 2;
-        const y = wrap(t.homeY + panY, worldH) - worldH / 2;
-
-        t.el.style.transform =
-          `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, ${z.toFixed(1)}px) translate(-50%, -50%)`;
-
-        // Depth of field: sharp at focus, blurrier with distance either way.
-        const d = z - Z_FOCUS;
-        const blur = d <= 0 ? Math.min(MAX_BLUR, -d / 185)
-                            : Math.min(MAX_BLUR, d / 130);
-
-        // Fade in from the far plane and out before the front recycle point.
-        let op = 1;
-        if (z < Z_BACK + 620)  op = Math.min(op, (z - Z_BACK) / 620);
-        if (z > Z_FRONT - 420)  op = Math.min(op, (Z_FRONT - z) / 420);
-        op = clamp(op, 0, 1);
-
-        // Only touch the DOM when values actually change (cheaper).
-        const bq = Math.round(blur * 2) / 2;
-        if (bq !== t.lastBlur) { t.el.style.filter = bq < 0.2 ? 'none' : `blur(${bq}px)`; t.lastBlur = bq; }
-        const oq = Math.round(op * 100) / 100;
-        if (oq !== t.lastOp) { t.el.style.opacity = oq; t.lastOp = oq; }
-
-        if (!t.loaded && oq > 0.04) {
-          t.loaded = true;
-          loadImg(t.img, t.work.img);
-        }
-      }
-    }
-
-    function loop() {
-      if (!active) return;
-      if (!dragging) {
-        panX += velX; panY += velY;
-        velX *= 0.92; velY *= 0.92;
-        if (Math.abs(velX) < 0.05) velX = 0;
-        if (Math.abs(velY) < 0.05) velY = 0;
-      }
-      travel += velT + AMBIENT;
-      velT *= 0.9;
-      if (Math.abs(velT) < 0.05) velT = 0;
-      render();
-      raf = requestAnimationFrame(loop);
-    }
-
-    /* ---- input ------------------------------------------------------ */
-    function onDown(e) {
-      dragging = true; moved = 0; axis = null;
-      isTouch = e.pointerType === 'touch';
-      pointerId = e.pointerId;
-      lastX = e.clientX; lastY = e.clientY;
-      velX = velY = velT = 0;
-      els.canvas.classList.add('is-dragging');
-      els.canvas.setPointerCapture(pointerId);
-      hideHint();
-    }
-    function onMove(e) {
-      if (!dragging) return;
-      const dx = e.clientX - lastX, dy = e.clientY - lastY;
-      lastX = e.clientX; lastY = e.clientY;
-      moved += Math.abs(dx) + Math.abs(dy);
-
-      // Touch has no wheel: lock each swipe to pan (horizontal) or travel
-      // (vertical) so phones can still fly through the depth.
-      if (isTouch) {
-        if (axis === null && moved > 12) axis = Math.abs(dy) > Math.abs(dx) ? 'z' : 'xy';
-        if (axis === 'z') { travel -= dy * 1.4; velT = -dy * 1.4; return; }
-      }
-      panX += dx; panY += dy;
-      velX = dx; velY = dy;
-    }
-    function onUp() {
-      if (!dragging) return;
-      dragging = false;
-      els.canvas.classList.remove('is-dragging');
-      try { els.canvas.releasePointerCapture(pointerId); } catch (_) {}
-    }
-    function onWheel(e) {
-      e.preventDefault();
-      travel += e.deltaY * 0.9;
-      velT = e.deltaY * 0.5;
-      hideHint();
-    }
-
-    let hintTimer = null;
-    function hideHint() { els.hint.classList.add('is-hidden'); }
-
-    function start() {
-      if (active) return;
-      active = true;
-      if (!tiles.length) build();
-      els.hint.classList.remove('is-hidden');
-      clearTimeout(hintTimer);
-      hintTimer = setTimeout(hideHint, 4600);
-      raf = requestAnimationFrame(loop);
-    }
-    function stop() {
-      active = false;
-      if (raf) cancelAnimationFrame(raf);
-    }
-
-    els.canvas.addEventListener('pointerdown', onDown);
-    els.canvas.addEventListener('pointermove', onMove);
-    els.canvas.addEventListener('pointerup', onUp);
-    els.canvas.addEventListener('pointercancel', onUp);
-    els.canvas.addEventListener('wheel', onWheel, { passive: false });
-
-    let rt = null;
-    window.addEventListener('resize', () => {
-      clearTimeout(rt);
-      rt = setTimeout(() => { if (active) build(); }, 200);
-    });
-
-    return { start, stop };
-  })();
-
-  /* ================================================================== GRID */
-  const Grid = (function () {
-    const cards = new Map();   // work.id -> card element
-    let built = false;
-    let sortKey = 'name';
-    let dir = 1;               // 1 asc, -1 desc
-
     const COMPARATORS = {
       name:     (a, b) => a.title.localeCompare(b.title),
       color:    (a, b) => a.hue - b.hue || a.title.localeCompare(b.title),
@@ -269,138 +111,315 @@
       client:   (a, b) => a.client.localeCompare(b.client) || a.title.localeCompare(b.title)
     };
 
-    // Secondary label shown under the title, contextual to the active sort.
     function subFor(work) {
       switch (sortKey) {
         case 'color':    return work.colorName;
         case 'category': return work.category;
         case 'mood':     return work.mood;
         case 'client':   return work.client;
-        default:         return work.category;
+        default:         return work.category + ' · ' + work.year;
       }
     }
 
+    /* ---- build ---------------------------------------------------------- */
+    function metrics() {
+      const vw = window.innerWidth, vh = window.innerHeight;
+      focal = (vh / 2) / Math.tan((FOV_DEG / 2) * Math.PI / 180);
+      cx = vw / 2; cy = vh / 2;
+
+      // lateral tiling period — wide enough that wraps happen off-screen for
+      // the still-visible depth band (beyond it, fade hides any seam).
+      const halfW = (150 * (vw / 2)) / focal;
+      period = Math.max(300, halfW * 2.6);
+
+      // grid layout
+      const small = vw < 700;
+      const pad = small ? 16 : 30;
+      const gap = small ? 14 : 22;
+      cell = small ? 150 : 210;
+      cols = Math.max(2, Math.floor((vw - 2 * pad + gap) / (cell + gap)));
+      stride = cell + gap;
+      const contentW = cols * stride - gap;
+      gridLeft = (vw - contentW) / 2;
+      gridTop = 104;
+      const rows = Math.ceil(DATA.length / cols);
+      const contentH = rows * stride - gap;
+      gridMaxScroll = Math.max(0, gridTop + contentH + 110 - vh);
+    }
+
     function build() {
+      metrics();
+      els.scene.innerHTML = '';
+      tiles = [];
+      const rand = rng(424242);
       const frag = document.createDocumentFragment();
-      DATA.forEach(work => {
-        const card = document.createElement('article');
-        card.className = 'card';
-        card.style.setProperty('--c', work.color);
+
+      DATA.forEach((work, idx) => {
+        const el = document.createElement('div');
+        el.className = 'tile';
+        el.style.height = BASE + 'px';
+        el.style.width = (BASE * work.aspect) + 'px';
+        el.style.setProperty('--c', work.color);
 
         const img = document.createElement('img');
         img.alt = work.title;
-        img.loading = 'lazy';
+        img.draggable = false;
+        el.appendChild(img);
 
-        const info = document.createElement('div');
-        info.className = 'card__info';
-        info.innerHTML =
-          `<div><div class="card__title">${work.title}</div>` +
-          `<div class="card__sub" data-sub>${subFor(work)}</div></div>` +
-          `<span class="card__swatch" style="background:${work.color}"></span>`;
+        const label = document.createElement('div');
+        label.className = 'tile__label';
+        label.innerHTML =
+          `<div><div class="tile__title">${work.title}</div>` +
+          `<div class="tile__sub" data-sub>${subFor(work)}</div></div>` +
+          `<span class="tile__swatch" style="background:${work.color}"></span>`;
+        el.appendChild(label);
 
-        card.appendChild(img);
-        card.appendChild(info);
-        card.addEventListener('click', () => openDetail(work));
-        card._work = work;
-        card._img = img;
-        cards.set(work.id, card);
-        frag.appendChild(card);
-      });
-      els.grid.appendChild(frag);
-      built = true;
-      applySort(false);
-    }
+        el.addEventListener('click', () => { if (moved < 7) openDetail(work); });
 
-    function loadVisibleImages() {
-      cards.forEach(card => {
-        if (card._loaded) return;
-        card._loaded = true;
-        loadImg(card._img, card._work.img);
-      });
-    }
-
-    // FLIP: animate cards from old to new positions after re-ordering.
-    function applySort(animate) {
-      const ordered = [...DATA].sort((a, b) => COMPARATORS[sortKey](a, b) * dir);
-
-      const nodes = [...els.grid.children];
-      const first = animate ? new Map(nodes.map(n => [n, n.getBoundingClientRect()])) : null;
-
-      ordered.forEach(work => {
-        const card = cards.get(work.id);
-        card.querySelector('[data-sub]').textContent = subFor(work);
-        els.grid.appendChild(card);
-      });
-
-      if (!animate) return;
-
-      nodes.forEach(card => {
-        const last = card.getBoundingClientRect();
-        const f = first.get(card);
-        const dx = f.left - last.left;
-        const dy = f.top - last.top;
-        if (!dx && !dy) return;
-        card.style.transition = 'none';
-        card.style.transform = `translate(${dx}px, ${dy}px)`;
-      });
-      requestAnimationFrame(() => {
-        nodes.forEach(card => {
-          card.style.transition = 'transform .6s cubic-bezier(.22,1,.36,1)';
-          card.style.transform = '';
+        frag.appendChild(el);
+        tiles.push({
+          el, img, work, idx, label: label.querySelector('[data-sub]'),
+          // world position, randomly seeded across the tiling cell
+          wx: rand() * period, wy: rand() * period, wz: rand() * PZ,
+          size: SIZE_MIN + rand() * SIZE_SPAN,
+          op: 0, gx: 0, gy: 0, lastOp: -1, loaded: false
         });
       });
+
+      els.scene.appendChild(frag);
+      computeOrder();
+      // seed grid positions so the first arrange flies from canvas → grid
+      tiles.forEach(t => { const g = gridTargetFor(t); t.gx = g.x; t.gy = g.y; });
+    }
+
+    function computeOrder() {
+      const sorted = DATA.map((_, i) => i)
+        .sort((a, b) => COMPARATORS[sortKey](DATA[a], DATA[b]) * sortDir);
+      sorted.forEach((workIdx, pos) => { orderPos[workIdx] = pos; });
+    }
+
+    function gridTargetFor(t) {
+      const pos = orderPos[t.idx];
+      const r = Math.floor(pos / cols), c = pos % cols;
+      return {
+        x: gridLeft + c * stride + cell / 2,
+        y: gridTop + r * stride + cell / 2 - gridScrollY
+      };
+    }
+
+    /* ---- per-frame ------------------------------------------------------ */
+    function simCamera() {
+      tvel.z += scrollAccum;
+      tvel.x = clamp(tvel.x, -MAX_VELOCITY, MAX_VELOCITY);
+      tvel.y = clamp(tvel.y, -MAX_VELOCITY, MAX_VELOCITY);
+      tvel.z = clamp(tvel.z, -MAX_VELOCITY, MAX_VELOCITY);
+
+      vel.x = lerp(vel.x, tvel.x, VELOCITY_LERP);
+      vel.y = lerp(vel.y, tvel.y, VELOCITY_LERP);
+      vel.z = lerp(vel.z, tvel.z, VELOCITY_LERP);
+
+      cam.x += vel.x; cam.y += vel.y; cam.z += vel.z;
+
+      tvel.x *= VELOCITY_DECAY; tvel.y *= VELOCITY_DECAY; tvel.z *= VELOCITY_DECAY;
+      scrollAccum *= SCROLL_DECAY;
+    }
+
+    function frame() {
+      // ease morph
+      if (morph !== morphTarget) {
+        morph += (morphTarget - morph) * 0.1;
+        if (Math.abs(morphTarget - morph) < 0.0015) morph = morphTarget;
+      }
+      const m = easeInOut(morph);
+      const canvasLive = morph < 0.002;
+
+      if (canvasLive) simCamera();
+      gridScrollY += (gridScrollTarget - gridScrollY) * 0.16;
+
+      const gridEase = justArranged ? 1 : 0.2;
+      justArranged = false;
+
+      for (let i = 0; i < tiles.length; i++) {
+        const t = tiles[i];
+
+        /* ---- grid target (eased so sorting re-flows smoothly) ---- */
+        const g = gridTargetFor(t);
+        t.gx += (g.x - t.gx) * gridEase;
+        t.gy += (g.y - t.gy) * gridEase;
+        const gScale = Math.min(cell / BASE, cell / (BASE * t.work.aspect));
+
+        /* ---- canvas projection ---- */
+        const relX = wrap(t.wx - cam.x + period / 2, period) - period / 2;
+        const relY = wrap(t.wy - cam.y + period / 2, period) - period / 2;
+        let depth = wrap((cam.z - t.wz) + 40, PZ) - 40;     // [-40, 320]
+        const dd = Math.max(depth, 4);
+        const pScale = focal / dd;
+        const csx = cx + relX * pScale;
+        const csy = cy - relY * pScale;
+        const cDom = (t.size * pScale) / BASE;
+
+        // vanishing: squared depth fade, lerped — exactly the reference
+        let target = depth <= FADE_START ? 1
+                   : Math.max(0, 1 - (depth - FADE_START) / (FADE_END - FADE_START));
+        target = target * target;
+        if (depth <= 2) target = 0;                          // behind camera
+        t.op += (target - t.op) * OPACITY_LERP;
+
+        /* ---- blend canvas → grid ---- */
+        const px = lerp(csx, t.gx, m);
+        const py = lerp(csy, t.gy, m);
+        const s  = lerp(cDom, gScale, m);
+        const op = lerp(t.op, 1, m);
+
+        t.el.style.transform =
+          `translate(${px.toFixed(1)}px, ${py.toFixed(1)}px) translate(-50%, -50%) scale(${s.toFixed(4)})`;
+        const oq = Math.round(op * 100) / 100;
+        if (oq !== t.lastOp) { t.el.style.opacity = oq; t.lastOp = oq; }
+
+        if (!t.loaded && oq > 0.03) { t.loaded = true; loadImg(t.img, t.work.img); }
+      }
+
+      raf = requestAnimationFrame(frame);
+    }
+
+    /* ---- input ---------------------------------------------------------- */
+    function onDown(e) {
+      els.canvas.setPointerCapture(e.pointerId);
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      dragging = true; moved = 0; axis = null;
+      isTouch = e.pointerType === 'touch';
+      lastX = e.clientX; lastY = e.clientY;
+      tvel.x = tvel.y = tvel.z = 0;
+      if (pointers.size === 2) {
+        const [a, b] = [...pointers.values()];
+        pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
+      }
+      els.canvas.classList.add('is-dragging');
+      hideHint();
+    }
+
+    function onMove(e) {
+      if (!pointers.has(e.pointerId)) return;
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      // two-finger pinch → travel in z (reference behaviour)
+      if (pointers.size === 2) {
+        const [a, b] = [...pointers.values()];
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (pinchDist) scrollAccum += (pinchDist - d) * PINCH_MULT;
+        pinchDist = d;
+        return;
+      }
+      if (!dragging) return;
+
+      const dx = e.clientX - lastX, dy = e.clientY - lastY;
+      lastX = e.clientX; lastY = e.clientY;
+      moved += Math.abs(dx) + Math.abs(dy);
+
+      if (morphTarget === 1) {                 // grid: drag scrolls the grid
+        gridScrollTarget = clamp(gridScrollTarget - dy, 0, gridMaxScroll);
+        return;
+      }
+      const k = isTouch ? TOUCH_MULT : DRAG_MULT;
+      tvel.x -= dx * k;
+      tvel.y += dy * k;
+    }
+
+    function onUp(e) {
+      pointers.delete(e.pointerId);
+      if (pointers.size < 2) pinchDist = 0;
+      if (pointers.size === 0) {
+        dragging = false;
+        els.canvas.classList.remove('is-dragging');
+      }
+      try { els.canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+    }
+
+    function onWheel(e) {
+      e.preventDefault();
+      if (morphTarget === 1) {
+        gridScrollTarget = clamp(gridScrollTarget + e.deltaY, 0, gridMaxScroll);
+      } else {
+        scrollAccum += e.deltaY * WHEEL_MULT;
+      }
+      hideHint();
+    }
+
+    let hintTimer = null;
+    function hideHint() { els.hint.classList.add('is-hidden'); }
+
+    /* ---- public --------------------------------------------------------- */
+    function setView(view) {
+      morphTarget = view === 'grid' ? 1 : 0;
+      if (view === 'grid') { gridScrollTarget = gridScrollY = 0; }
+      els.body.classList.toggle('mode-grid', view === 'grid');
+      els.sortbar.setAttribute('aria-hidden', String(view !== 'grid'));
+      if (view === 'grid') { clearTimeout(hintTimer); hideHint(); }
+      else { els.hint.classList.remove('is-hidden'); clearTimeout(hintTimer); hintTimer = setTimeout(hideHint, 4600); }
     }
 
     function setSort(key) {
       if (key === sortKey) return;
       sortKey = key;
-      applySort(true);
+      computeOrder();
+      justArranged = false;                    // ease into the new arrangement
+      tiles.forEach(t => { t.label.textContent = subFor(t.work); });
     }
     function toggleDir() {
-      dir *= -1;
-      applySort(true);
+      sortDir *= -1;
+      computeOrder();
+      tiles.forEach(t => { t.label.textContent = subFor(t.work); });
     }
 
-    function show() {
-      if (!built) build();
-      loadVisibleImages();
+    function init() {
+      build();
+      els.canvas.addEventListener('pointerdown', onDown);
+      els.canvas.addEventListener('pointermove', onMove);
+      els.canvas.addEventListener('pointerup', onUp);
+      els.canvas.addEventListener('pointercancel', onUp);
+      els.canvas.addEventListener('wheel', onWheel, { passive: false });
+
+      let rt = null;
+      window.addEventListener('resize', () => {
+        clearTimeout(rt);
+        rt = setTimeout(() => {
+          metrics();
+          tiles.forEach(t => { const g = gridTargetFor(t); t.gx = g.x; t.gy = g.y; });
+        }, 180);
+      });
+
+      els.hint.classList.remove('is-hidden');
+      hintTimer = setTimeout(hideHint, 4600);
+      raf = requestAnimationFrame(frame);
     }
 
-    return { show, setSort, toggleDir, getKey: () => sortKey };
+    return { init, setView, setSort, toggleDir };
   })();
 
-  /* ============================================================ MODE SWITCH */
-  function setMode(mode) {
-    const grid = mode === 'grid';
-    els.body.classList.toggle('mode-grid', grid);
-    els.grid.hidden = !grid;
-    els.sortbar.setAttribute('aria-hidden', String(!grid));
-
-    document.querySelectorAll('.modeswitch__btn').forEach(btn => {
-      const on = btn.dataset.mode === mode;
-      btn.classList.toggle('is-active', on);
-      btn.setAttribute('aria-selected', String(on));
+  /* ============================================================ UI WIRING */
+  document.querySelectorAll('.modeswitch__btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const mode = btn.dataset.mode;
+      document.querySelectorAll('.modeswitch__btn').forEach(b => {
+        const on = b === btn;
+        b.classList.toggle('is-active', on);
+        b.setAttribute('aria-selected', String(on));
+      });
+      Field.setView(mode);
     });
-
-    if (grid) { Canvas.stop(); Grid.show(); window.scrollTo({ top: 0 }); }
-    else      { Canvas.start(); }
-  }
-
-  document.querySelectorAll('.modeswitch__btn').forEach(btn =>
-    btn.addEventListener('click', () => setMode(btn.dataset.mode))
-  );
+  });
 
   els.sortGroup.addEventListener('click', e => {
     const chip = e.target.closest('.chip');
     if (!chip) return;
     els.sortGroup.querySelectorAll('.chip').forEach(c => c.classList.remove('is-active'));
     chip.classList.add('is-active');
-    Grid.setSort(chip.dataset.sort);
+    Field.setSort(chip.dataset.sort);
   });
 
   els.dirBtn.addEventListener('click', () => {
     els.dirBtn.classList.toggle('is-desc');
-    Grid.toggleDir();
+    Field.toggleDir();
   });
 
   /* ========================================================= DETAIL OVERLAY */
@@ -416,9 +435,7 @@
       row('Year', work.year);
     els.detail.hidden = false;
   }
-  function row(label, value) {
-    return `<dt>${label}</dt><dd>${value}</dd>`;
-  }
+  function row(label, value) { return `<dt>${label}</dt><dd>${value}</dd>`; }
   function closeDetail() { els.detail.hidden = true; }
 
   els.detailClose.addEventListener('click', closeDetail);
@@ -426,5 +443,5 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDetail(); });
 
   /* =================================================================== BOOT */
-  setMode('canvas');
+  Field.init();
 })();

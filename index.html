@@ -44,15 +44,12 @@
     </button>
   </div>
 
-  <!-- Infinite canvas -->
+  <!-- Infinite canvas + grid share one pool of tiles -->
   <main class="canvas" id="canvas" aria-label="Infinite canvas">
     <div class="canvas__scene" id="scene"></div>
     <div class="canvas__vignette" aria-hidden="true"></div>
-    <div class="canvas__hint" id="canvasHint">Drag to pan · scroll to travel deeper · click a work for details</div>
+    <div class="canvas__hint" id="canvasHint">Drag to pan · scroll to travel · pinch to zoom · click a work for details</div>
   </main>
-
-  <!-- Grid -->
-  <section class="grid" id="grid" aria-label="Grid of works" hidden></section>
 
   <!-- Detail overlay -->
   <div class="detail" id="detail" hidden>

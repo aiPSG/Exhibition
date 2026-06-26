@@ -31,7 +31,6 @@ html, body {
 }
 
 body { overflow: hidden; }
-body.mode-grid { overflow: auto; }
 
 img { display: block; max-width: 100%; }
 button { font: inherit; color: inherit; cursor: pointer; }
@@ -168,7 +167,11 @@ body.mode-grid .sortbar { transform: translate(-50%, 0); opacity: 1; }
 .dir:hover { background: rgba(255,255,255,.1); }
 .dir.is-desc svg { transform: rotate(180deg); }
 
-/* --------------------------------------------------------- infinite canvas */
+/* ----------------------------------------------- infinite canvas + grid stage
+   The same pool of tiles lives here for both views. The camera is simulated in
+   JS and every tile is projected to 2D each frame (perspective done by hand to
+   mirror the reference's three.js camera), so the canvas can morph fluidly into
+   the grid layout without a hard switch. */
 .canvas {
   position: fixed;
   inset: 0;
@@ -176,29 +179,24 @@ body.mode-grid .sortbar { transform: translate(-50%, 0); opacity: 1; }
   cursor: grab;
   touch-action: none;
   background:
-    radial-gradient(130% 100% at 50% 42%, #1c1c22 0%, #101013 55%, #0a0a0c 100%);
+    radial-gradient(130% 100% at 50% 44%, #16161b 0%, #0d0d10 55%, #08080a 100%);
 }
 .canvas.is-dragging { cursor: grabbing; }
-body.mode-grid .canvas { display: none; }
+body.mode-grid .canvas { cursor: default; }
 
-/* The 3D stage. Perspective + per-tile translateZ gives real depth,
-   parallax, and the receding "vanishing point". */
-.canvas__scene {
-  position: absolute;
-  inset: 0;
-  perspective: 1200px;
-  perspective-origin: 50% 48%;
-  transform-style: preserve-3d;
-}
+.canvas__scene { position: absolute; inset: 0; }
 
-/* Soft vignette deepens the sense of distance. */
+/* Subtle vignette to seat the work in space. */
 .canvas__vignette {
   position: absolute;
   inset: 0;
   pointer-events: none;
   z-index: 20;
-  background: radial-gradient(125% 95% at 50% 48%, transparent 52%, rgba(8,8,11,.55) 100%);
+  opacity: 1;
+  transition: opacity .6s var(--ease);
+  background: radial-gradient(125% 95% at 50% 48%, transparent 58%, rgba(6,6,9,.5) 100%);
 }
+body.mode-grid .canvas__vignette { opacity: 0; }
 
 .canvas__hint {
   position: fixed;
@@ -222,14 +220,19 @@ body.mode-grid .canvas { display: none; }
 .canvas__hint.is-hidden { opacity: 0; }
 @media (max-width: 560px) { .canvas__hint { font-size: 11px; padding: 7px 12px; } }
 
-/* A work tile, shared by canvas + grid */
+/* A work tile. Sits at the scene's top-left; JS drives its transform
+   (translate + scale) and opacity every frame for both views. Its centre is
+   anchored via the translate(-50%,-50%) baked into the JS transform string. */
 .tile {
   position: absolute;
   top: 0; left: 0;
   overflow: hidden;
-  border-radius: 4px;
+  border-radius: 3px;
   background: var(--c, #222);
-  will-change: transform;
+  transform-origin: 50% 50%;
+  backface-visibility: hidden;
+  box-shadow: 0 34px 70px -24px rgba(0,0,0,.75);
+  will-change: transform, opacity;
   user-select: none;
   -webkit-user-drag: none;
 }
@@ -238,7 +241,7 @@ body.mode-grid .canvas { display: none; }
   height: 100%;
   object-fit: cover;
   opacity: 0;
-  transition: opacity .6s var(--ease), transform .8s var(--ease);
+  transition: opacity .7s var(--ease);
   pointer-events: none;
 }
 .tile img.is-loaded { opacity: 1; }
@@ -246,74 +249,33 @@ body.mode-grid .canvas { display: none; }
   content: "";
   position: absolute;
   inset: 0;
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,.05);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
   border-radius: inherit;
   pointer-events: none;
 }
-/* Canvas tiles are positioned in 3D by JS every frame, so no CSS transitions
-   on transform/filter/opacity (they would fight the animation loop). */
-.canvas .tile {
-  top: 50%;
-  left: 50%;
-  border-radius: 3px;
-  transition: none;
-  backface-visibility: hidden;
-  box-shadow: 0 34px 70px -24px rgba(0,0,0,.75);
-  will-change: transform, filter, opacity;
-}
-.canvas .tile::after { box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
-.canvas .tile:hover img { transform: scale(1.05); }
 
-/* ---------------------------------------------------------------- the grid */
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: var(--gap);
-  padding: 96px 28px 120px;
-  max-width: 1500px;
-  margin: 0 auto;
-}
-body:not(.mode-grid) .grid { display: none; }
-
-.card {
-  position: relative;
-  aspect-ratio: 1 / 1;
-  overflow: hidden;
-  border-radius: 6px;
-  background: var(--c, #222);
-  cursor: pointer;
-  will-change: transform;
-}
-.card img {
-  width: 100%; height: 100%;
-  object-fit: cover;
-  opacity: 0;
-  transition: opacity .6s var(--ease), transform .6s var(--ease);
-}
-.card img.is-loaded { opacity: 1; }
-.card:hover img { transform: scale(1.05); }
-
-.card__info {
+/* Caption — hidden in the canvas, revealed once arranged into the grid. */
+.tile__label {
   position: absolute;
   inset: auto 0 0 0;
-  padding: 28px 14px 12px;
-  background: linear-gradient(to top, rgba(0,0,0,.78), transparent);
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
+  padding: 40px 16px 14px;
+  background: linear-gradient(to top, rgba(0,0,0,.8), transparent);
   opacity: 0;
-  transform: translateY(8px);
-  transition: opacity .35s, transform .35s;
+  transition: opacity .4s var(--ease);
+  pointer-events: none;
 }
-.card:hover .card__info { opacity: 1; transform: none; }
-.card__title { font-size: 14px; font-weight: 600; }
-.card__sub { font-size: 11px; color: var(--ink-dim); }
-.card__swatch {
+body.mode-grid .tile:hover .tile__label { opacity: 1; }
+.tile__title { font-size: 15px; font-weight: 600; letter-spacing: .01em; }
+.tile__sub   { font-size: 12px; color: var(--ink-dim); margin-top: 2px; }
+.tile__swatch {
   width: 18px; height: 18px;
   border-radius: 50%;
   flex: none;
-  box-shadow: 0 0 0 1px rgba(255,255,255,.25);
+  box-shadow: 0 0 0 1px rgba(255,255,255,.3);
 }
 
 /* ----------------------------------------------------------- detail overlay */
