@@ -37,7 +37,13 @@
     focusClose:  document.getElementById('focusClose'),
     loader:      document.getElementById('loader'),
     loaderBar:   document.getElementById('loaderBar'),
-    loaderPct:   document.getElementById('loaderPct')
+    loaderPct:   document.getElementById('loaderPct'),
+    settings:      document.getElementById('settings'),
+    settingsToggle:document.getElementById('settingsToggle'),
+    settingsPanel: document.getElementById('settingsPanel'),
+    durRange:      document.getElementById('durRange'),
+    durInput:      document.getElementById('durInput'),
+    easeSelect:    document.getElementById('easeSelect')
   };
 
   els.workCount.textContent = String(DATA.length).padStart(2, '0') + ' works';
@@ -131,8 +137,26 @@
 
     let focal = 0, cx = 0, cy = 0, period = 360;
 
-    // view morph: 0 = canvas, 1 = grid
-    let morph = 0, morphTarget = 0;
+    // view morph: 0 = canvas, 1 = grid. The canvas→grid transition is staged
+    // per axis (X, then Y, then Z/scale) and is a time-based tween whose
+    // duration + easing are editable from the settings UI.
+    let morphTarget = 0;                 // 0 canvas, 1 grid (discrete target)
+    let morphing = false, morphT0 = 0;   // tween running? + start timestamp
+    let ax = 0, ay = 0, az = 0;          // per-axis progress (0 canvas → 1 grid)
+    let axS = 0, ayS = 0, azS = 0;       // per-axis start values for this tween
+
+    const cfg = { duration: 1400, easing: 'easeInOutCubic' };
+    const EASINGS = {
+      linear:         t => t,
+      easeInQuad:     t => t * t,
+      easeOutQuad:    t => 1 - (1 - t) * (1 - t),
+      easeInOutQuad:  t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2,
+      easeInCubic:    t => t * t * t,
+      easeOutCubic:   t => 1 - Math.pow(1 - t, 3),
+      easeInOutCubic: t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2,
+      easeOutBack:    t => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); },
+      easeInOutBack:  t => { const c2 = 1.70158 * 1.525; return t < 0.5 ? (Math.pow(2 * t, 2) * ((c2 + 1) * 2 * t - c2)) / 2 : (Math.pow(2 * t - 2, 2) * ((c2 + 1) * (t * 2 - 2) + c2) + 2) / 2; }
+    };
 
     // focus. Canvas view: a real camera dolly (centre + fly toward the work)
     // with a crisp full-size <img> overlay tracking the focused tile so it
@@ -349,11 +373,23 @@
     }
 
     function frame() {
-      if (morph !== morphTarget) {
-        morph += (morphTarget - morph) * 0.1;
-        if (Math.abs(morphTarget - morph) < 0.0015) morph = morphTarget;
+      // Staged canvas↔grid tween: X first, then Y, then Z (scale). Time-based
+      // with editable duration + easing. Reverse order (Z,Y,X) when returning.
+      if (morphing) {
+        const t = clamp((performance.now() - morphT0) / cfg.duration, 0, 1);
+        const e = EASINGS[cfg.easing] || EASINGS.easeInOutCubic;
+        const step = k => e(clamp((t - k / 3) * 3, 0, 1));   // 3 sequential thirds
+        if (morphTarget === 1) {                 // canvas → grid: X, then Y, then Z
+          ax = lerp(axS, 1, step(0));
+          ay = lerp(ayS, 1, step(1));
+          az = lerp(azS, 1, step(2));
+        } else {                                 // grid → canvas: Z, then Y, then X
+          az = lerp(azS, 0, step(0));
+          ay = lerp(ayS, 0, step(1));
+          ax = lerp(axS, 0, step(2));
+        }
+        if (t >= 1) { morphing = false; ax = ay = az = morphTarget; }
       }
-      const m = easeInOut(morph);
 
       // focus progress 0..1
       const focusGoal = (focusActive && !focusReturning) ? 1 : 0;
@@ -373,7 +409,7 @@
         }
       } else {
         if (focusReturning && focusAmt < 0.01) { focusActive = false; focusReturning = false; focusTile = null; }
-        if (!focusActive && focusAmt < 0.002 && morph < 0.002) simCamera();
+        if (!focusActive && focusAmt < 0.002 && !morphing && morphTarget === 0) simCamera();
       }
 
       // overlay crossfade — held at 0 until the hi-res is decoded (no flash);
@@ -416,10 +452,11 @@
         if (depth <= 2) target = 0;
         t.op += (target - t.op) * OPACITY_LERP;
 
-        const px = lerp(csx, t.gx, m);
-        const py = lerp(csy, t.gy, m);
-        const s  = lerp(cDom, gScale, m);
-        let op = lerp(t.op, 1, m);
+        // staged blend: X, Y and scale(Z) each on their own progress
+        const px = lerp(csx, t.gx, ax);
+        const py = lerp(csy, t.gy, ay);
+        const s  = lerp(cDom, gScale, az);
+        let op = lerp(t.op, 1, Math.max(ax, ay, az));
 
         // remember the on-screen rect so the overlay can track / dolly from here
         t.lpx = px; t.lpy = py; t.ls = s;
@@ -546,14 +583,22 @@
 
     /* ---- public --------------------------------------------------------- */
     function setView(view) {
+      const next = view === 'grid' ? 1 : 0;
+      if (next === morphTarget && !morphing) return;
       if (focusActive) exitFocus();
-      morphTarget = view === 'grid' ? 1 : 0;
+      morphTarget = next;
+      // start the staged tween from wherever the axes currently are
+      axS = ax; ayS = ay; azS = az;
+      morphT0 = performance.now();
+      morphing = true;
       if (view === 'grid') { gridScrollTarget = gridScrollY = 0; }
       els.body.classList.toggle('mode-grid', view === 'grid');
       els.sortbar.setAttribute('aria-hidden', String(view !== 'grid'));
       if (view === 'grid') { clearTimeout(hintTimer); hideHint(); }
       else { els.hint.classList.remove('is-hidden'); clearTimeout(hintTimer); hintTimer = setTimeout(hideHint, 4600); }
     }
+    function setDuration(ms) { cfg.duration = clamp(ms, 100, 8000); }
+    function setEasing(name) { if (EASINGS[name]) cfg.easing = name; }
     function setSort(key) {
       if (key === sortKey) return;
       sortKey = key; computeOrder();
@@ -589,7 +634,7 @@
       requestAnimationFrame(frame);
     }
 
-    return { init, setView, setSort, toggleDir, exitFocus };
+    return { init, setView, setSort, toggleDir, exitFocus, setDuration, setEasing };
   })();
 
   /* ============================================================ UI WIRING */
@@ -619,6 +664,23 @@
 
   els.focusClose.addEventListener('click', () => Field.exitFocus());
   document.addEventListener('keydown', e => { if (e.key === 'Escape') Field.exitFocus(); });
+
+  /* ---- settings: transition duration + easing ---- */
+  els.settingsToggle.addEventListener('click', () => {
+    const open = els.settingsPanel.hidden;
+    els.settingsPanel.hidden = !open;
+    els.settings.classList.toggle('is-open', open);
+    els.settingsToggle.setAttribute('aria-expanded', String(open));
+  });
+  function applyDuration(v) {
+    const ms = Math.max(100, Math.min(8000, Math.round(v) || 0));
+    els.durRange.value = Math.max(200, Math.min(4000, ms));
+    els.durInput.value = ms;
+    Field.setDuration(ms);
+  }
+  els.durRange.addEventListener('input', () => applyDuration(+els.durRange.value));
+  els.durInput.addEventListener('input', () => applyDuration(+els.durInput.value));
+  els.easeSelect.addEventListener('change', () => Field.setEasing(els.easeSelect.value));
 
   /* =================================================================== BOOT */
   Field.init();                          // builds the field (enqueues low-res first)

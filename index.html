@@ -60,6 +60,39 @@
     <div class="canvas__hint" id="canvasHint">Drag to pan · scroll to travel · pinch to zoom · click a work for details</div>
   </main>
 
+  <!-- Animation settings -->
+  <div class="settings" id="settings">
+    <button class="settings__toggle" id="settingsToggle" aria-label="Animation settings" aria-expanded="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 100-7 3.5 3.5 0 000 7z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M19.4 13a7.5 7.5 0 000-2l2-1.5-2-3.5-2.4 1a7.5 7.5 0 00-1.7-1l-.3-2.5h-4l-.3 2.5a7.5 7.5 0 00-1.7 1l-2.4-1-2 3.5L4.6 11a7.5 7.5 0 000 2l-2 1.5 2 3.5 2.4-1a7.5 7.5 0 001.7 1l.3 2.5h4l.3-2.5a7.5 7.5 0 001.7-1l2.4 1 2-3.5-2-1.5z" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".6"/></svg>
+    </button>
+    <div class="settings__panel" id="settingsPanel" hidden>
+      <div class="settings__title">Transition</div>
+      <div class="settings__row">
+        <label for="durRange">Duration</label>
+        <input type="range" id="durRange" min="200" max="4000" step="50" value="1400" />
+        <div class="settings__num">
+          <input type="number" id="durInput" min="100" max="8000" step="50" value="1400" />
+          <span>ms</span>
+        </div>
+      </div>
+      <div class="settings__row">
+        <label for="easeSelect">Easing</label>
+        <select id="easeSelect">
+          <option value="linear">Linear</option>
+          <option value="easeInQuad">Ease In (quad)</option>
+          <option value="easeOutQuad">Ease Out (quad)</option>
+          <option value="easeInOutQuad">Ease In-Out (quad)</option>
+          <option value="easeInCubic">Ease In (cubic)</option>
+          <option value="easeOutCubic">Ease Out (cubic)</option>
+          <option value="easeInOutCubic" selected>Ease In-Out (cubic)</option>
+          <option value="easeOutBack">Ease Out (back)</option>
+          <option value="easeInOutBack">Ease In-Out (back)</option>
+        </select>
+      </div>
+      <div class="settings__note">Grid transition runs in 3 stages: X → Y → Z</div>
+    </div>
+  </div>
+
   <!-- Full-screen image overlay (laid out at full size so hi-res stays crisp;
        a transform-scaled tile would rasterise at its tiny layout size) -->
   <div class="focusview" id="focusview" aria-hidden="true">
