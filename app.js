@@ -169,14 +169,18 @@
     const fstart = { sx: 0, sy: 0, scale: 1, restH: 1 };
     const camTarget = { x: 0, y: 0, z: 0 };
     const preCam = { x: 0, y: 0, z: 0 };
+    // focus flight tween (time-based, honours cfg.duration + cfg.easing)
+    const camStart = { x: 0, y: 0, z: 0 };
+    let focusT0 = 0, focusDur = 1400, focusEase = 'easeInOutCubic', focusFrom = 0, focusTo = 0;
 
     // grid layout
     let cols = 4, cell = 200, stride = 222, gridLeft = 0, gridTop = 96;
     let gridScrollY = 0, gridScrollTarget = 0, gridMaxScroll = 0;
 
-    // sorting
+    // sorting (re-sort reflow is a time-based tween honouring cfg.duration/easing)
     let sortKey = 'name', sortDir = 1;
     const orderPos = new Array(DATA.length).fill(0);
+    let sorting = false, sortT0 = 0, sortP = 1, sortEased = 1;
 
     let dragging = false, isTouch = false, moved = 0, multi = false;
     let lastX = 0, lastY = 0;
@@ -268,6 +272,7 @@
           wx: rand() * period, wy: rand() * period, wz: rand() * PZ,
           size: SIZE_MIN + rand() * SIZE_SPAN,
           op: 0, gx: 0, gy: 0, lpx: 0, lpy: 0, ls: 0, fx: 0, fy: 0, fz: 0,
+          posPrev: 0,
           lastOp: -1, lastZ: 0, lastPE: '', loaded: false
         };
         // NB: clicks are handled in onUp (pointer capture swallows the
@@ -279,7 +284,7 @@
 
       els.scene.appendChild(frag);
       computeOrder();
-      tiles.forEach(t => { const g = gridTargetFor(t); t.gx = g.x; t.gy = g.y; });
+      tiles.forEach(t => { t.posPrev = orderPos[t.idx]; const g = gridTargetFor(t); t.gx = g.x; t.gy = g.y; });
       // eager-load every low-res image so the field is fully populated
       tiles.forEach(t => { t.loaded = true; loadImg(t.img, t.work.img); });
     }
@@ -289,13 +294,18 @@
         .sort((a, b) => COMPARATORS[sortKey](DATA[a], DATA[b]) * sortDir);
       sorted.forEach((workIdx, pos) => { orderPos[workIdx] = pos; });
     }
-    function gridTargetFor(t) {
-      const pos = orderPos[t.idx];
+    function cellOf(pos) {
       const r = Math.floor(pos / cols), c = pos % cols;
       return {
         x: gridLeft + c * stride + cell / 2,
         y: gridTop + r * stride + cell / 2 - gridScrollY
       };
+    }
+    // Re-sort tween: interpolate between the previous cell and the new cell by
+    // sortEased (a time-based, cfg-driven progress). Both include live scroll.
+    function gridTargetFor(t) {
+      const a = cellOf(t.posPrev), b = cellOf(orderPos[t.idx]);
+      return { x: lerp(a.x, b.x, sortEased), y: lerp(a.y, b.y, sortEased) };
     }
 
     /* ---- focus --------------------------------------------------------- */
@@ -323,6 +333,7 @@
         }
         flight = true;
         preCam.x = cam.x; preCam.y = cam.y; preCam.z = cam.z;
+        camStart.x = cam.x; camStart.y = cam.y; camStart.z = cam.z;
         // Fly straight at the work: centre it (cam.xy → its xy) and dolly until
         // it fills the frame (depth → depthFit).
         const depthFit = (t.size * focal) / fstart.restH;
@@ -330,6 +341,11 @@
         camTarget.y = t.fy;
         camTarget.z = t.fz + depthFit;
       }
+
+      // time-based flight tween (honours the settings)
+      focusFrom = focusAmt; focusTo = 1;
+      focusT0 = performance.now();
+      focusDur = cfg.duration; focusEase = cfg.easing;
 
       // Only reveal the overlay once the hi-res has actually decoded, so there's
       // no empty/stale flash during the low→hi handoff.
@@ -353,6 +369,11 @@
     function exitFocus() {
       if (!focusActive || focusReturning) return;
       focusReturning = true;                 // canvas: fly camera back; grid: fade out
+      // time-based return tween (honours the settings), from wherever we are now
+      camStart.x = cam.x; camStart.y = cam.y; camStart.z = cam.z;
+      focusFrom = focusAmt; focusTo = 0;
+      focusT0 = performance.now();
+      focusDur = cfg.duration; focusEase = cfg.easing;
       els.body.classList.remove('mode-focus');
       els.focusbar.classList.remove('is-on');
     }
@@ -391,25 +412,31 @@
         if (t >= 1) { morphing = false; ax = ay = az = morphTarget; }
       }
 
-      // focus progress 0..1
-      const focusGoal = (focusActive && !focusReturning) ? 1 : 0;
-      focusAmt += (focusGoal - focusAmt) * 0.09;
-      if (Math.abs(focusGoal - focusAmt) < 0.001) focusAmt = focusGoal;
+      // re-sort reflow tween (time-based, cfg-driven)
+      if (sorting) {
+        sortP = clamp((performance.now() - sortT0) / cfg.duration, 0, 1);
+        if (sortP >= 1) { sorting = false; sortP = 1; tiles.forEach(t => { t.posPrev = orderPos[t.idx]; }); }
+      }
+      sortEased = (EASINGS[cfg.easing] || easeInOut)(sortP);
 
-      // camera: in canvas focus the camera actually flies to (or back from)
-      // the work; otherwise it runs the normal momentum simulation.
-      if (focusMode === 'canvas' && (focusActive || focusReturning)) {
-        const tgt = focusReturning ? preCam : camTarget;
-        cam.x += (tgt.x - cam.x) * 0.08;
-        cam.y += (tgt.y - cam.y) * 0.08;
-        cam.z += (tgt.z - cam.z) * 0.08;
-        if (focusReturning &&
-            Math.abs(cam.x - tgt.x) + Math.abs(cam.y - tgt.y) + Math.abs(cam.z - tgt.z) < 0.5) {
-          focusActive = false; focusReturning = false; focusTile = null; flight = false;
+      // focus flight (time-based, cfg-driven). Camera flies to (or back from)
+      // the work over cfg.duration with cfg.easing; otherwise normal momentum.
+      if (focusActive || focusReturning) {
+        const prog = clamp((performance.now() - focusT0) / focusDur, 0, 1);
+        const f = (EASINGS[focusEase] || easeInOut)(prog);
+        focusAmt = lerp(focusFrom, focusTo, f);
+        if (focusMode === 'canvas') {
+          const tgt = focusReturning ? preCam : camTarget;
+          cam.x = lerp(camStart.x, tgt.x, f);
+          cam.y = lerp(camStart.y, tgt.y, f);
+          cam.z = lerp(camStart.z, tgt.z, f);
         }
-      } else {
-        if (focusReturning && focusAmt < 0.01) { focusActive = false; focusReturning = false; focusTile = null; }
-        if (!focusActive && focusAmt < 0.002 && !morphing && morphTarget === 0) simCamera();
+        if (prog >= 1) {
+          focusAmt = focusTo;
+          if (focusReturning) { focusActive = false; focusReturning = false; focusTile = null; flight = false; }
+        }
+      } else if (!morphing && morphTarget === 0) {
+        simCamera();
       }
 
       // overlay crossfade — held at 0 until the hi-res is decoded (no flash);
@@ -423,9 +450,8 @@
       for (let i = 0; i < tiles.length; i++) {
         const t = tiles[i];
 
-        const g = gridTargetFor(t);
-        t.gx += (g.x - t.gx) * 0.2;
-        t.gy += (g.y - t.gy) * 0.2;
+        const g = gridTargetFor(t);   // already tweened + scroll-adjusted
+        t.gx = g.x; t.gy = g.y;
         const gScale = 0.8 * Math.min(cell / BASE, cell / (BASE * t.work.aspect));  // 20% smaller in grid
 
         // During a canvas flight, wrapping is suspended: tiles use their frozen
@@ -457,6 +483,12 @@
         const py = lerp(csy, t.gy, ay);
         const s  = lerp(cDom, gScale, az);
         let op = lerp(t.op, 1, Math.max(ax, ay, az));
+
+        // No image should come "from in front of the screen" (negative z) when
+        // moving to the grid. Tiles that start larger than the screen plane
+        // (cDom > 1) stay hidden through the X/Y slide and only fade in as they
+        // shrink to grid scale (the Z phase) — so nothing looms in from the front.
+        if (morphTarget === 1 && cDom > 1) op *= az;
 
         // remember the on-screen rect so the overlay can track / dolly from here
         t.lpx = px; t.lpy = py; t.ls = s;
@@ -599,14 +631,18 @@
     }
     function setDuration(ms) { cfg.duration = clamp(ms, 100, 8000); }
     function setEasing(name) { if (EASINGS[name]) cfg.easing = name; }
-    function setSort(key) {
-      if (key === sortKey) return;
-      sortKey = key; computeOrder();
+    function startSortTween() {
+      tiles.forEach(t => { t.posPrev = orderPos[t.idx]; });   // freeze current targets
+      computeOrder();                                          // compute new targets
+      sortP = 0; sortT0 = performance.now(); sorting = true;
       tiles.forEach(t => { t.label.textContent = subFor(t.work); });
     }
+    function setSort(key) {
+      if (key === sortKey) return;
+      sortKey = key; startSortTween();
+    }
     function toggleDir() {
-      sortDir *= -1; computeOrder();
-      tiles.forEach(t => { t.label.textContent = subFor(t.work); });
+      sortDir *= -1; startSortTween();
     }
 
     function init() {
