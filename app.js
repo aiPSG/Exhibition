@@ -80,11 +80,15 @@
     return { enqueue };
   })();
 
-  // Load a field/grid image (via the queue) then fade it into its <img>.
-  function loadImg(imgEl, src) {
+  // Load a field/grid image (via the queue) then fade it into its <img>. If it
+  // ultimately fails, keep re-trying with backoff so blanks self-heal instead of
+  // staying lost (the loading bar only counts the first settle).
+  function loadImg(imgEl, src, tries) {
+    tries = tries || 0;
     ImageQueue.enqueue(src, ok => {
       if (ok) { imgEl.src = src; requestAnimationFrame(() => imgEl.classList.add('is-loaded')); }
-      bumpProgress();                        // count toward the loading bar either way
+      else if (tries < 6) { setTimeout(() => loadImg(imgEl, src, tries + 1), 1500 * (tries + 1)); }
+      if (tries === 0) bumpProgress();       // count each image once, on first settle
     });
   }
 
@@ -272,7 +276,7 @@
           wx: rand() * period, wy: rand() * period, wz: rand() * PZ,
           size: SIZE_MIN + rand() * SIZE_SPAN,
           op: 0, gx: 0, gy: 0, lpx: 0, lpy: 0, ls: 0, fx: 0, fy: 0, fz: 0,
-          posPrev: 0,
+          g0x: 0, g0y: 0,
           lastOp: -1, lastZ: 0, lastPE: '', loaded: false
         };
         // NB: clicks are handled in onUp (pointer capture swallows the
@@ -284,7 +288,8 @@
 
       els.scene.appendChild(frag);
       computeOrder();
-      tiles.forEach(t => { t.posPrev = orderPos[t.idx]; const g = gridTargetFor(t); t.gx = g.x; t.gy = g.y; });
+      tiles.forEach(t => { const c = cellOf(orderPos[t.idx]); t.g0x = c.x; t.g0y = c.y;
+                           const g = gridTargetFor(t); t.gx = g.x; t.gy = g.y; });
       // eager-load every low-res image so the field is fully populated
       tiles.forEach(t => { t.loaded = true; loadImg(t.img, t.work.img); });
     }
@@ -294,18 +299,18 @@
         .sort((a, b) => COMPARATORS[sortKey](DATA[a], DATA[b]) * sortDir);
       sorted.forEach((workIdx, pos) => { orderPos[workIdx] = pos; });
     }
-    function cellOf(pos) {
+    function cellOf(pos) {                    // content-space (scroll applied later)
       const r = Math.floor(pos / cols), c = pos % cols;
-      return {
-        x: gridLeft + c * stride + cell / 2,
-        y: gridTop + r * stride + cell / 2 - gridScrollY
-      };
+      return { x: gridLeft + c * stride + cell / 2, y: gridTop + r * stride + cell / 2 };
     }
-    // Re-sort tween: interpolate between the previous cell and the new cell by
-    // sortEased (a time-based, cfg-driven progress). Both include live scroll.
+    // Re-sort tween: interpolate from where the tile actually is at sort start
+    // (t.g0*, so interrupts don't jump) to its new cell, then apply live scroll.
     function gridTargetFor(t) {
-      const a = cellOf(t.posPrev), b = cellOf(orderPos[t.idx]);
-      return { x: lerp(a.x, b.x, sortEased), y: lerp(a.y, b.y, sortEased) };
+      const b = cellOf(orderPos[t.idx]);
+      return {
+        x: lerp(t.g0x, b.x, sortEased),
+        y: lerp(t.g0y, b.y, sortEased) - gridScrollY
+      };
     }
 
     /* ---- focus --------------------------------------------------------- */
@@ -415,7 +420,7 @@
       // re-sort reflow tween (time-based, cfg-driven)
       if (sorting) {
         sortP = clamp((performance.now() - sortT0) / cfg.duration, 0, 1);
-        if (sortP >= 1) { sorting = false; sortP = 1; tiles.forEach(t => { t.posPrev = orderPos[t.idx]; }); }
+        if (sortP >= 1) { sorting = false; sortP = 1; tiles.forEach(t => { const c = cellOf(orderPos[t.idx]); t.g0x = c.x; t.g0y = c.y; }); }
       }
       sortEased = (EASINGS[cfg.easing] || easeInOut)(sortP);
 
@@ -506,8 +511,17 @@
         const oq = Math.round(op * 100) / 100;
         if (oq !== t.lastOp) { t.el.style.opacity = oq; t.lastOp = oq; }
 
-        // depth sorting: nearer (smaller depth) paints on top
-        const zi = Math.round(100000 - depth * 10);
+        // Stacking. Canvas: by depth (nearer on top). Grid: flat, but a tile
+        // in motion rides above settled ones (z grows with distance-to-cell) so
+        // a re-sorting tile never ducks behind its neighbours and vanishes.
+        let zi;
+        if (morphTarget === 1) {
+          const tc = cellOf(orderPos[t.idx]);
+          const dist = Math.abs(t.gx - tc.x) + Math.abs(t.gy - (tc.y - gridScrollY));
+          zi = 200000 + Math.round(dist);
+        } else {
+          zi = Math.round(100000 - depth * 10);
+        }
         if (zi !== t.lastZ) { t.el.style.zIndex = zi; t.lastZ = zi; }
 
         // don't let invisible tiles intercept clicks
@@ -632,7 +646,9 @@
     function setDuration(ms) { cfg.duration = clamp(ms, 100, 8000); }
     function setEasing(name) { if (EASINGS[name]) cfg.easing = name; }
     function startSortTween() {
-      tiles.forEach(t => { t.posPrev = orderPos[t.idx]; });   // freeze current targets
+      // start from where each tile actually is right now (content-space), so an
+      // interrupted sort keeps moving smoothly instead of snapping.
+      tiles.forEach(t => { t.g0x = t.gx; t.g0y = t.gy + gridScrollY; });
       computeOrder();                                          // compute new targets
       sortP = 0; sortT0 = performance.now(); sorting = true;
       tiles.forEach(t => { t.label.textContent = subFor(t.work); });
@@ -660,6 +676,7 @@
           metrics();
           tiles.forEach(t => {
             t.el.style.width = (BASE * t.work.aspect) + 'px';
+            const c = cellOf(orderPos[t.idx]); t.g0x = c.x; t.g0y = c.y;
             const g = gridTargetFor(t); t.gx = g.x; t.gy = g.y;
           });
         }, 180);
