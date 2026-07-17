@@ -87,9 +87,9 @@
     tries = tries || 0;
     ImageQueue.enqueue(src, ok => {
       if (ok) { imgEl.src = src; requestAnimationFrame(() => imgEl.classList.add('is-loaded')); }
-      else if (tries < 6) { setTimeout(() => loadImg(imgEl, src, tries + 1), 1500 * (tries + 1)); }
+      else if (tries < 12) { setTimeout(() => loadImg(imgEl, src, tries + 1), Math.min(8000, 1200 * (tries + 1))); }
       if (tries === 0) bumpProgress();       // count each image once, on first settle
-    });
+    }, tries > 0);                           // retries jump the queue (ahead of the hi-res backlog)
   }
 
   // Loading-bar progress across every image (low-res field + hi-res focus).
@@ -483,17 +483,17 @@
         if (depth <= 2) target = 0;
         t.op += (target - t.op) * OPACITY_LERP;
 
-        // staged blend: X, Y and scale(Z) each on their own progress
+        // Going to the grid, nothing should loom in from the front / be too big.
+        // Any tile that would render larger than its grid cell (cDom > gScale) is
+        // capped to grid size AND kept hidden through the X/Y slide, fading in at
+        // its cell during the final (Z) phase — so it never appears oversized and
+        // never pops (the shrink happens while it's invisible).
+        const tooBig = morphTarget === 1 && cDom > gScale;
         const px = lerp(csx, t.gx, ax);
         const py = lerp(csy, t.gy, ay);
-        const s  = lerp(cDom, gScale, az);
+        const s  = lerp(tooBig ? gScale : cDom, gScale, az);
         let op = lerp(t.op, 1, Math.max(ax, ay, az));
-
-        // No image should come "from in front of the screen" (negative z) when
-        // moving to the grid. Tiles that start larger than the screen plane
-        // (cDom > 1) stay hidden through the X/Y slide and only fade in as they
-        // shrink to grid scale (the Z phase) — so nothing looms in from the front.
-        if (morphTarget === 1 && cDom > 1) op *= az;
+        if (tooBig) op *= az;
 
         // remember the on-screen rect so the overlay can track / dolly from here
         t.lpx = px; t.lpy = py; t.ls = s;
